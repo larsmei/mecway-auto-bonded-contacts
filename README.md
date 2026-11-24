@@ -69,18 +69,19 @@ Every unordered pair of components is considered. Components whose bounding boxe
 
 For each solid element the script asks Mecway for every face (`mw.face_nodes`). A face is free when no other element in the same component has the same set of node ids. Shared internal faces appear twice and are discarded. Shells contribute one surface per element (face 5, or face 6 if face 5 has no nodes).
 
-### 2. Seed pairs
+### 2. Face pairs
 
-Two free faces, one on each component, become a seed when all of the following are true:
+Every free face is compared with every opposite face whose bounding box lies within the tolerance. The grid only limits that search. It does not decide the contact. A node is never reduced to one face: each free face that uses the node is tested on its own.
+
+A pair is a contact when all of the following are true:
 
 - The angle between their planes is at most the value you entered. The test is `|n1 · n2| >= cos(angle)`. Opposite normals still match, because only the absolute value is used. 15° is about `|n1 · n2| >= 0.9659`.
-- Their bounding boxes overlap within the tolerance.
-- One of its nodes is within the tolerance of an opposite face, measured along that face normal. Every free face that uses this node is then checked, not only the first. The node does not have to land inside the face outline.
-- The two faces have a projected area overlap. Every opposite face that overlaps the free face of such a node is kept. A shared edge has no area and is not enough.
+- At least one node is within the tolerance of the other face, measured along that face normal. The node does not have to land inside the face outline.
+- The projected areas overlap. A shared edge has no area and is not a contact.
 
-### 3. Coverage
+### 3. What is kept
 
-After the seeds, every remaining free face is tested the same way: a node within the normal tolerance, then a projected overlap with a partner face.
+There is no second, weaker pass. A face that fails the three tests above is not added later. Faces that do overlap are all kept, including those whose nodes sit outside the partner outline.
 
 ### 4. One node, one contact
 
@@ -88,7 +89,7 @@ A node must not appear in more than one contact set. The same component can mate
 
 Each accepted face is scored against its partner:
 
-- primary: fraction of the face nodes that project onto the partner;
+- primary: projected overlap area divided by the face area;
 - secondary: smaller gap between the two planes wins ties.
 
 Faces are assigned in score order. If any node of a face is already owned by another contact, the whole face is dropped from this contact. It cannot be split. If either side of a contact becomes empty, that contact is discarded and reported in the summary.
@@ -182,6 +183,7 @@ Edit these near the top of `AutoBondedContacts.py` if the defaults are wrong for
 
 ## Version
 
+1.0.8 — contact search rewritten. Every face whose box is in range is tested. A node is no longer required to fall inside the partner outline.
 1.0.7 — a bend stays one contact. Growth follows the surface and adds the facing partner face, not only faces already marked.
 1.0.6 — gaps in a contact patch are filled so the marked surface stays continuous.
 1.0.5 — every free face of a qualifying node is checked, not only the first.

@@ -491,63 +491,6 @@ def build_adjacency(faces):
     return adj
 
 
-def partners_near(face, partner_faces, tol):
-    box = face["aabb"]
-    return [p for p in partner_faces if aabb_hit(box, p["aabb"], tol)]
-
-
-def overlaps_any(face, partners, tol, dot_min):
-    for other in partners:
-        if faces_match(face, other, tol, dot_min):
-            return True
-    return False
-
-
-def add_overlapping(faces, acc, partner_faces, tol, dot_min):
-    """Every face with a projected overlap belongs in the set, adjacent or not."""
-    added = False
-    for i, face in enumerate(faces):
-        if i in acc:
-            continue
-        near = partners_near(face, partner_faces, tol)
-        if overlaps_any(face, near, tol, dot_min):
-            acc.add(i)
-            added = True
-    return added
-
-
-def ensure_coverage(faces_a, _adj_a, acc_a, faces_b, _adj_b, acc_b, tol, dot_min):
-    limit = 4
-    for _ in xrange(limit):
-        before_a = len(acc_a)
-        before_b = len(acc_b)
-        add_overlapping(faces_a, acc_a, faces_b, tol, dot_min)
-        add_overlapping(faces_b, acc_b, faces_a, tol, dot_min)
-        if len(acc_a) == before_a and len(acc_b) == before_b:
-            break
-    return acc_a, acc_b
-
-
-def face_fit(face, partners, tol, dot_min):
-    """Overlap area over face area. Larger projected coverage wins."""
-    area = face["area"]
-    best = 0.0
-    best_gap = tol
-    for other in partners:
-        if not angle_ok(face, other, dot_min):
-            continue
-        ov = overlap_on(face, other, tol)
-        if ov > best:
-            best = ov
-            c0 = dot(sub(face["origin"], other["origin"]), other["normal"])
-            gap = c0 if c0 >= 0.0 else -c0
-            best_gap = gap
-    frac = best / area if area > 0.0 else 0.0
-    if frac > 1.0:
-        frac = 1.0
-    return (frac, -best_gap)
-
-
 def resolve_exclusive(pairs, node_index):
     """Each node is in one set. The better geometric fit keeps the face."""
     items = []
@@ -796,57 +739,9 @@ def _better(store, idx, frac, gap):
         store[idx] = cand
 
 
-def faces_of_nodes(faces):
-    """Every free face that uses a node. A node is never reduced to its first face."""
-    by_node = {}
-    coords = {}
-    for index, face in enumerate(faces):
-        nodes = face["nodes"]
-        pts = face["pts"]
-        for i in xrange(len(nodes)):
-            nid = nodes[i]
-            coords[nid] = pts[i]
-            bucket = by_node.get(nid)
-            if bucket is None:
-                by_node[nid] = [index]
-            elif index not in bucket:
-                bucket.append(index)
-    return by_node, coords
-
-
-def qualifying_nodes(coords, opposite, bins, tol):
-    """Nodes whose normal distance to any opposite face is within tolerance."""
-    found = {}
-    for nid, point in iteritems(coords):
-        box = (point[0], point[1], point[2], point[0], point[1], point[2])
-        best = None
-        for ib in bins.query(box):
-            gap = normal_gap(point, opposite[ib])
-            if gap <= tol and (best is None or gap < best):
-                best = gap
-        if best is not None:
-            found[nid] = best
-    return found
-
-
-def consider_pair(ia, ib, fa, fb, tol, dot_min, hits_a, hits_b, score_a, score_b, partner_a, partner_b):
-    if not angle_ok(fa, fb, dot_min):
-        return
-    if not aabb_hit(fa["aabb"], fb["aabb"], tol):
-        return
-    area = projected_overlap(fa, fb, tol)
-    if area <= 0.0:
-        return
+def record_hit(ia, ib, fa, fb, area, gap, hits_a, hits_b, score_a, score_b, partner_a, partner_b):
     hits_a.add(ia)
     hits_b.add(ib)
-    gap_a = nodes_within_normal(fa, fb, tol)
-    gap_b = nodes_within_normal(fb, fa, tol)
-    if gap_a is None:
-        gap = gap_b if gap_b is not None else tol
-    elif gap_b is None or gap_a < gap_b:
-        gap = gap_a
-    else:
-        gap = gap_b
     area_a = fa["area"]
     area_b = fb["area"]
     frac_a = area / area_a if area_a > 0.0 else 0.0
@@ -865,153 +760,47 @@ def consider_pair(ia, ib, fa, fb, tol, dot_min, hits_a, hits_b, score_a, score_b
         partner_b[ib] = ia
 
 
-def hull_outside(p2, hull):
-    nearest = 1e300
-    outside = False
-    n = len(hull)
-    for i in xrange(n):
-        a = hull[i]
-        b = hull[(i + 1) % n]
-        cr = (b[0] - a[0]) * (p2[1] - a[1]) - (b[1] - a[1]) * (p2[0] - a[0])
-        if cr < -1e-12:
-            outside = True
-            de = dist_point_seg_2d(p2, a, b)
-            if de < nearest:
-                nearest = de
-    if not outside:
-        return 0.0
-    return nearest
+def find_interface(list_a, list_b, tol, dot_min, prog, frac, text):
+    """Contact faces between two components.
 
+    Every free face is compared with every opposite face whose box lies
+    within the tolerance. A node is never reduced to a single face: each
+    face that uses the node is a separate entry and is tested on its own.
 
-def projects_on(point, face, tol):
-    if normal_gap(point, face) > tol:
-        return False
-    ox, oy, oz = face["origin"]
-    dx = point[0] - ox
-    dy = point[1] - oy
-    dz = point[2] - oz
-    u = face["u"]
-    v = face["v"]
-    p2 = (
-        dx * u[0] + dy * u[1] + dz * u[2],
-        dx * v[0] + dy * v[1] + dz * v[2],
-    )
-    return hull_outside(p2, face["hull"]) <= tol
-
-
-def grow_side(faces, adj, acc, score, partner_of, partner_faces, partner_acc, bins, tol, dot_min):
-    """Walk a smooth surface and add every face that still meets the partner."""
-    if not acc or not partner_faces:
-        return
-    pending = list(acc)
-    seen = set(acc)
-    while pending:
-        i = pending.pop()
-        for j in adj[i]:
-            if j in seen:
-                continue
-            face = faces[j]
-            if not angle_ok(face, faces[i], dot_min):
-                continue
-            samples = [face["centroid"]]
-            samples.extend(face["pts"])
-            chosen = None
-            gap = tol
-            for ib in bins.query(face["aabb"]):
-                other = partner_faces[ib]
-                if not angle_ok(face, other, dot_min):
-                    continue
-                if not aabb_hit(face["aabb"], other["aabb"], tol):
-                    continue
-                hit = projected_overlap(face, other, tol) > 0.0
-                if not hit:
-                    for point in samples:
-                        if projects_on(point, other, tol):
-                            hit = True
-                            gap = normal_gap(point, other)
-                            break
-                if not hit:
-                    continue
-                chosen = ib
-                break
-            if chosen is None:
-                continue
-            seen.add(j)
-            acc.add(j)
-            pending.append(j)
-            partner_acc.add(chosen)
-            _better(score, j, 0.5, gap)
-            if j not in partner_of:
-                partner_of[j] = chosen
-
-
-def seal_pair(faces_a, acc_a, score_a, partner_a, faces_b, acc_b, score_b, partner_b, tol, dot_min):
-    adj_a = build_adjacency(faces_a)
-    adj_b = build_adjacency(faces_b)
-    bins_a = Broadphase(faces_a, tol)
-    bins_b = Broadphase(faces_b, tol)
-    limit = len(faces_a) + len(faces_b) + 2
-    for _ in xrange(limit):
-        before_a = len(acc_a)
-        before_b = len(acc_b)
-        grow_side(
-            faces_a, adj_a, acc_a, score_a, partner_a,
-            faces_b, acc_b, bins_b, tol, dot_min,
-        )
-        grow_side(
-            faces_b, adj_b, acc_b, score_b, partner_b,
-            faces_a, acc_a, bins_a, tol, dot_min,
-        )
-        if len(acc_a) == before_a and len(acc_b) == before_b:
-            break
-
-
-def seed_pairs(list_a, list_b, tol, dot_min, prog, frac, text):
+    A pair is kept only when all three of the following are true:
+    the angle is within the limit, at least one node is within the normal
+    tolerance of the other plane, and the projected areas overlap.
+    """
     hits_a = set()
     hits_b = set()
     score_a = {}
     score_b = {}
     partner_a = {}
     partner_b = {}
-    by_a, coords_a = faces_of_nodes(list_a)
-    by_b, coords_b = faces_of_nodes(list_b)
-    bins_b = Broadphase(list_b, tol)
-    bins_a = Broadphase(list_a, tol)
-    qual_a = qualifying_nodes(coords_a, list_b, bins_b, tol)
-    qual_b = qualifying_nodes(coords_b, list_a, bins_a, tol)
-    seen = {}
-    n_nodes = len(qual_a) + len(qual_b)
-    done = 0
-
-    def accept_faces(face_indexes, faces, bins, other_faces, source_is_a):
-        for ia in face_indexes:
-            face = faces[ia]
-            for ib in bins.query(face["aabb"]):
-                key = (ia, ib) if source_is_a else (ib, ia)
-                if key in seen:
-                    continue
-                seen[key] = True
-                if source_is_a:
-                    consider_pair(
-                        ia, ib, face, other_faces[ib], tol, dot_min,
-                        hits_a, hits_b, score_a, score_b, partner_a, partner_b,
-                    )
-                else:
-                    consider_pair(
-                        ib, ia, other_faces[ib], face, tol, dot_min,
-                        hits_a, hits_b, score_a, score_b, partner_a, partner_b,
-                    )
-
-    for nid in qual_a:
-        done += 1
-        if done % 40 == 0:
-            prog.set(frac, "%s  %d/%d nodes" % (text, done, n_nodes))
-        accept_faces(by_a[nid], list_a, bins_b, list_b, True)
-    for nid in qual_b:
-        done += 1
-        if done % 40 == 0:
-            prog.set(frac, "%s  %d/%d nodes" % (text, done, n_nodes))
-        accept_faces(by_b[nid], list_b, bins_a, list_a, False)
+    if not list_a or not list_b:
+        return hits_a, hits_b, score_a, score_b, partner_a, partner_b
+    bins = Broadphase(list_b, tol)
+    n_a = len(list_a)
+    for ia, fa in enumerate(list_a):
+        if ia % 25 == 0:
+            prog.set(frac, "%s  %d/%d faces" % (text, ia, n_a))
+        for ib in bins.query(fa["aabb"]):
+            fb = list_b[ib]
+            if not faces_match(fa, fb, tol, dot_min):
+                continue
+            area = projected_overlap(fa, fb, tol)
+            gap_a = nodes_within_normal(fa, fb, tol)
+            gap_b = nodes_within_normal(fb, fa, tol)
+            if gap_a is None:
+                gap = gap_b if gap_b is not None else 0.0
+            elif gap_b is None or gap_a <= gap_b:
+                gap = gap_a
+            else:
+                gap = gap_b
+            record_hit(
+                ia, ib, fa, fb, area, gap,
+                hits_a, hits_b, score_a, score_b, partner_a, partner_b,
+            )
     return hits_a, hits_b, score_a, score_b, partner_a, partner_b
 
 
@@ -1197,10 +986,11 @@ USAGE = (
     "You will be asked for a position tolerance in mm and a maximum "
     "inclination in degrees (default 15).\n"
     "A window shows the progress.\n\n"
+    "Every free face is tested against the opposite faces within the tolerance.\n"
     "A node counts when its normal distance is within the tolerance. "
-    "Every free face of that node is checked, not only the first. "
-    "A face is kept when it has a projected overlap with an opposite face. "
-    "Gaps in that patch are closed so the marked surface stays continuous.\n"
+    "Every free face of that node is tested, not only the first.\n"
+    "The face is kept when the projected areas overlap and the angle "
+    "is within the given limit.\n"
     "Each node belongs to only one contact set. Beams are ignored.\n\n"
     "Save the model first. After the run, reload it and do not save before that."
 )
@@ -1346,20 +1136,14 @@ def _run(tol_mm, tol_m, angle, dot_min, prog, comps):
         prog.set(frac, text, force=True)
         if not aabb_hit(fa["aabb"], fb["aabb"], tol_m):
             continue
-        seeds_a, seeds_b, score_a, score_b, partner_a, partner_b = seed_pairs(
+        hits_a, hits_b, score_a, score_b, partner_a, partner_b = find_interface(
             fa["faces"], fb["faces"], tol_m, dot_min, prog, frac, text)
-        if not seeds_a or not seeds_b:
+        if not hits_a or not hits_b:
             continue
-        prog.set(frac + 0.01, "Closing gaps: %s / %s" % (na, nb), force=True)
-        seal_pair(
-            fa["faces"], seeds_a, score_a, partner_a,
-            fb["faces"], seeds_b, score_b, partner_b,
-            tol_m, dot_min,
-        )
         keys_a, score_key_a = keys_for(
-            fa["faces"], seeds_a, fb["faces"], partner_a, score_a, node_index)
+            fa["faces"], hits_a, fb["faces"], partner_a, score_a, node_index)
         keys_b, score_key_b = keys_for(
-            fb["faces"], seeds_b, fa["faces"], partner_b, score_b, node_index)
+            fb["faces"], hits_b, fa["faces"], partner_b, score_b, node_index)
         if keys_a and keys_b:
             raw_pairs.append((na, nb, keys_a, keys_b, score_key_a, score_key_b))
 
@@ -1454,85 +1238,49 @@ def _self_test():
     a2 = quad([(0, 0.2, 0), (0, 0.8, 0), (0, 0.8, 1), (0, 0.2, 1)], 14, 1, (21, 22, 23, 24))
     b0 = quad([(0, 0, 0), (0, 1, 0), (0, 1, 1), (0, 0, 1)], 12, 1, (7, 8, 9, 10))
     side = quad([(0, 0, 0), (0.5, 0, 0), (0.5, 0, 1), (0, 0, 1)], 13, 2, (1, 11, 12, 4))
-    faces_a = [a0, a1, side, a2]
-    faces_b = [b0]
-    adj_a = build_adjacency(faces_a)
-    adj_b = build_adjacency(faces_b)
-    acc_a = set([0])
-    acc_b = set([0])
-    ensure_coverage(faces_a, adj_a, acc_a, faces_b, adj_b, acc_b, 0.03, dot15)
-    assert 1 not in acc_a, "no projected overlap, so the face is not added"
-    assert 2 not in acc_a, "perpendicular face must not be added"
-    assert 3 in acc_a, "projected overlap adds the opposite face"
-    wide = quad([(0, 0, 0), (10, 0, 0), (10, 1, 0), (0, 1, 0)], 30, 1, (31, 32, 33, 34))
-    cross = quad([(0.2, -10, 0), (0.8, -10, 0), (0.8, 10, 0), (0.2, 10, 0)], 31, 1, (35, 36, 37, 38))
-    assert faces_match(wide, cross, 1e-6, dot15), "projected overlap counts when the normal gap is small"
-    lifted = quad([(0, 0, 1), (10, 0, 1), (10, 1, 1), (0, 1, 1)], 34, 1, (47, 48, 49, 50))
-    assert not faces_match(wide, lifted, 1e-4, dot15), "normal distance above the tolerance rejects the face"
-    small = []
-    for i in xrange(6):
-        small.append(quad(
-            [(i, 0, 0), (i + 1, 0, 0), (i + 1, 1, 0), (i, 1, 0)],
-            40 + i, 1, (50 + i, 60 + i, 70 + i, 80 + i),
-        ))
-    far = quad([(0, 0, 10), (1, 0, 10), (1, 1, 10), (0, 1, 10)], 32, 1, (39, 40, 41, 42))
-    bins = Broadphase(small + [far], 1e-6)
-    found = bins.query(small[0]["aabb"])
-    assert 0 in found, "broadphase must keep a touching face"
-    assert len(small) not in found, "broadphase must skip distant faces"
-
-    # A long interface seeded at one end must still cover the far faces.
-    chain = []
-    for i in xrange(30):
-        chain.append(quad(
-            [(i, 0, 0), (i + 1, 0, 0), (i + 1, 1, 0), (i, 1, 0)],
-            100 + i,
-            1,
-            (i, i + 1, 1000 + i + 1, 1000 + i),
-        ))
-    plate = quad(
-        [(0, 0, 0), (30, 0, 0), (30, 1, 0), (0, 1, 0)],
-        200,
-        1,
-        (5000, 5001, 5002, 5003),
-    )
-    chain_acc = set([0])
-    plate_acc = set([0])
-    ensure_coverage(
-        chain, build_adjacency(chain), chain_acc,
-        [plate], build_adjacency([plate]), plate_acc,
-        0.001, dot15,
-    )
-    assert len(chain_acc) == 30, "far end of the last faces must be covered"
-
     class _Prog(object):
         def set(self, *_args, **_kwargs):
             return None
 
-    # One shared node, two free faces. Both must be tested, not only the first.
+    faces_a = [a0, a1, side, a2]
+    ha, hb, _sa, _sb, _pa, _pb = find_interface(
+        faces_a, [b0], 0.03, dot15, _Prog(), 0.5, "overlap")
+    assert 0 in ha and 3 in ha, "projected overlap keeps the face"
+    assert 1 not in ha, "a shared edge is not a projected overlap"
+    assert 2 not in ha, "a perpendicular face is not a contact"
+    assert 0 in hb
+
+    wide = quad([(0, 0, 0), (10, 0, 0), (10, 1, 0), (0, 1, 0)], 30, 1, (31, 32, 33, 34))
+    cross = quad([(0.2, -10, 0), (0.8, -10, 0), (0.8, 10, 0), (0.2, 10, 0)], 31, 1, (35, 36, 37, 38))
+    lifted = quad([(0, 0, 1), (10, 0, 1), (10, 1, 1), (0, 1, 1)], 34, 1, (47, 48, 49, 50))
+    assert faces_match(wide, cross, 1e-6, dot15), "projected overlap counts when the normal gap is small"
+    assert not faces_match(wide, lifted, 1e-4, dot15), "normal distance above the tolerance rejects the face"
+    ha, hb, _sa, _sb, _pa, _pb = find_interface(
+        [wide], [cross], 1e-6, dot15, _Prog(), 0.5, "cross")
+    assert ha and hb, "overlap counts even when no node lies inside the other face"
+
+    chain = []
+    for i in xrange(30):
+        chain.append(quad(
+            [(i, 0, 0), (i + 1, 0, 0), (i + 1, 1, 0), (i, 1, 0)],
+            100 + i, 1, (i, i + 1, 1000 + i + 1, 1000 + i),
+        ))
+    plate = quad(
+        [(0, 0, 0), (30, 0, 0), (30, 1, 0), (0, 1, 0)],
+        200, 1, (5000, 5001, 5002, 5003),
+    )
+    ha, hb, _sa, _sb, _pa, _pb = find_interface(
+        chain, [plate], 0.001, dot15, _Prog(), 0.5, "chain")
+    assert len(ha) == 30 and 0 in hb, "every face of a continuous interface is kept"
+
     left = quad([(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)], 300, 1, (1, 2, 3, 4))
     right = quad([(1, 0, 0), (2, 0, 0), (2, 1, 0), (1, 1, 0)], 301, 1, (2, 5, 6, 3))
     wall = quad([(1, 0, 0), (1, 1, 0), (1, 1, 1), (1, 0, 1)], 302, 2, (2, 3, 7, 8))
     cover = quad([(0, 0, 0), (2, 0, 0), (2, 1, 0), (0, 1, 0)], 303, 1, (9, 10, 11, 12))
-    ha, hb, _sa, _sb, _pa, _pb = seed_pairs(
+    ha, hb, _sa, _sb, _pa, _pb = find_interface(
         [left, right, wall], [cover], 1e-6, dot15, _Prog(), 0.5, "nodes")
-    assert 0 in ha and 1 in ha, "every free face of the node must be checked"
+    assert 0 in ha and 1 in ha, "every free face of the node is tested"
     assert 2 not in ha, "a face without projected overlap is not kept"
-    assert 0 in hb
-    # The middle quad is the same continuous surface and must be filled in.
-    q0 = quad([(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)], 400, 1, (1, 2, 3, 4))
-    q1 = quad([(1, 0, 0), (2, 0, 0), (2, 1, 0), (1, 1, 0)], 401, 1, (2, 5, 6, 3))
-    q2 = quad([(2, 0, 0), (3, 0, 0), (3, 1, 0), (2, 1, 0)], 402, 1, (5, 7, 8, 6))
-    plate = quad([(0, 0, 0), (3, 0, 0), (3, 1, 0), (0, 1, 0)], 403, 1, (9, 10, 11, 12))
-    side = quad([(1, 0, 0), (2, 0, 0), (2, 0, 1), (1, 0, 1)], 404, 2, (2, 5, 13, 14))
-    row = [q0, q1, q2, side]
-    acc = set([0, 2])
-    grow_side(
-        row, build_adjacency(row), acc, {}, {},
-        [plate], set([0]), Broadphase([plate], 1e-6), 1e-6, dot15,
-    )
-    assert 1 in acc, "a gap in a continuous surface must be filled"
-    assert 3 not in acc, "a perpendicular face must not be filled in"
 
     def arc_face(index, radius, eid, node0):
         a0 = index * 10.0 * math.pi / 180.0
@@ -1547,10 +1295,9 @@ def _self_test():
 
     inner = [arc_face(i, 1.0, 500 + i, 1000) for i in xrange(6)]
     outer = [arc_face(i, 1.002, 800 + i, 2000) for i in xrange(6)]
-    acc_i = set([0])
-    acc_o = set([0])
-    seal_pair(inner, acc_i, {}, {}, outer, acc_o, {}, {}, 0.01, dot15)
-    assert len(acc_i) == 6 and len(acc_o) == 6, "a bend must stay one continuous contact"
+    ha, hb, _sa, _sb, _pa, _pb = find_interface(
+        inner, outer, 0.01, dot15, _Prog(), 0.5, "bend")
+    assert len(ha) == 6 and len(hb) == 6, "a bend is found in full, not as scattered faces"
 
     def scored(keys, score):
         return dict((key, score) for key in keys)
