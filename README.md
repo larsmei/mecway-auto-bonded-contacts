@@ -87,14 +87,9 @@ After the pairs above, a face that shares an edge with an accepted face is added
 
 ### 4. One node, one contact
 
-A node should not appear in more than one contact set, but one shared edge node must not punch a hole. A face is removed only when half or more of its nodes already belong to another contact. The rest of the face stays.
+After the faces have been found, no node is allowed to belong to more than one contact pair. Faces of the same pair may share nodes.
 
-Each accepted face is scored against its partner:
-
-- primary: projected overlap area divided by the face area;
-- secondary: smaller gap between the two planes wins ties.
-
-Faces are assigned in score order. If any node of a face is already owned by another contact, the whole face is dropped from this contact. It cannot be split. If either side of a contact becomes empty, that contact is discarded and reported in the summary.
+Faces are assigned in score order. If any node of a face is already owned by another contact, the whole face is dropped. It cannot be split. If either side of a contact becomes empty, that contact is discarded and reported in the summary.
 
 The better geometric fit keeps the face. A large contact does not automatically steal the last pair.
 
@@ -185,6 +180,7 @@ Edit these near the top of `AutoBondedContacts.py` if the defaults are wrong for
 
 ## Version
 
+1.0.13 — a node belongs to one contact pair only. One shared node removes the face.
 1.0.12 — corner normals, robust overlap, gap fill along the surface, and a majority node rule.
 1.0.11 — only faces with opposite normals are contacts. Faces pointing the same way are ignored.
 1.0.10 — a small overlap counts. The gap is measured on the overlap, not at the first node.

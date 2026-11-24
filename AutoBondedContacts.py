@@ -567,10 +567,10 @@ def build_adjacency(faces):
 
 
 def resolve_exclusive(pairs, node_index):
-    """A face stays when most of its nodes are still free.
+    """No node belongs to more than one contact pair.
 
-    One shared edge node does not remove the face. The face is dropped
-    only when half or more of its nodes already belong to another contact.
+    Faces of the same pair may share nodes. A face is dropped as soon as
+    any of its nodes already belongs to a different pair.
     """
     items = []
     for i, pair in enumerate(pairs):
@@ -587,17 +587,17 @@ def resolve_exclusive(pairs, node_index):
         nodes = node_index.get(key, ())
         if not nodes:
             continue
-        taken = 0
+        conflict = False
         for nid in nodes:
             other = owner.get(nid)
             if other is not None and other != i:
-                taken += 1
-        if taken * 2 >= len(nodes):
+                conflict = True
+                break
+        if conflict:
             removed += 1
             continue
         for nid in nodes:
-            if nid not in owner:
-                owner[nid] = i
+            owner[nid] = i
         bucket = kept.get(i)
         if bucket is None:
             bucket = [set(), set()]
@@ -1180,9 +1180,9 @@ USAGE = (
     "The distance is taken on the overlap, not at the first node.\n"
     "A neighbouring face is added when it lies on the same surface, "
     "faces the opposite way and is within the tolerance.\n"
-    "A face is kept when most of its nodes are still free. "
-    "One shared edge node does not remove it.\n"
-    "Each node belongs to only one contact set. Beams are ignored.\n\n"
+    "After the search, no node is left in more than one contact pair. "
+    "A face is removed as soon as any of its nodes already belongs to another pair. "
+    "Beams are ignored.\n\n"
     "Save the model first. After the run, reload it and do not save before that."
 )
 
@@ -1553,7 +1553,7 @@ def _self_test():
                 owned[nid] = key
     assert 3 in owned
     assert len(resolved) == 1
-    # One shared node of three keeps the face. Two shared nodes remove it.
+    # One shared node removes the face, so that node stays in a single pair.
     node_index[(3, 1)] = (3, 20, 21)
     node_index[(8, 1)] = (1, 2, 30)
     node_index[(9, 2)] = (40, 41)
@@ -1565,10 +1565,10 @@ def _self_test():
     ]
     resolved2, removed2, dropped2 = resolve_exclusive(pairs2, node_index)
     keys2 = [k for _a, _b, h1, h2 in resolved2 for k in list(h1) + list(h2)]
-    assert (3, 1) in keys2, "one shared node must not remove a three-node face"
-    assert (8, 1) not in keys2, "two shared nodes remove the face"
-    assert removed2 == 1
-    assert dropped2 == 0
+    assert (3, 1) not in keys2, "one shared node removes the face"
+    assert (8, 1) not in keys2, "a face with taken nodes is removed"
+    assert removed2 == 2
+    assert dropped2 == 1
 
     # Raised midside nodes must not tilt the corner normal.
     mid = (0.5, 0.0, 0.2)
