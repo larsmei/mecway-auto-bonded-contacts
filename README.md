@@ -181,5 +181,6 @@ Edit these near the top of `AutoBondedContacts.py` if the defaults are wrong for
 
 ## Version
 
+1.0.2 — broadphase grid. Each face is tested only against nearby faces, and the overlap area is computed once.
 1.0.1 — coverage is the projected polygon intersection, not a node count. A face is added as soon as that area is real.
 1.0.0 — first release. Solids and shells, angle limit, progress window, exclusive nodes, `.liml` bonded contacts.

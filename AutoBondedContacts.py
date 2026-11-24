@@ -199,6 +199,8 @@ def prepare_face(eid, fid, pts, kind, nodes):
         sum(p[1] for p in pts) / n,
         sum(p[2] for p in pts) / n,
     )
+    xs = [p[0] for p in hull]
+    ys = [p[1] for p in hull]
     return {
         "eid": eid,
         "fid": fid,
@@ -212,6 +214,8 @@ def prepare_face(eid, fid, pts, kind, nodes):
         "hull": hull,
         "centroid": c,
         "aabb": aabb_of(pts),
+        "aabb2": (min(xs), min(ys), max(xs), max(ys)),
+        "area": polygon_area(hull),
     }
 
 
@@ -308,55 +312,115 @@ def project_to_face(point, face):
     return (dot(d, face["u"]), dot(d, face["v"]))
 
 
-def overlap_on(base, other, tol):
-    """Area of other's projection on base, clipped to the tolerance gap."""
-    projected = [project_to_face(p, base) for p in other["pts"]]
-    other_hull = convex_hull(projected)
-    if len(other_hull) < 3 or len(base["hull"]) < 3:
-        return 0.0
-    inter = clip_convex(base["hull"], other_hull)
-    if len(inter) < 3:
-        inter = clip_convex(other_hull, base["hull"])
-    if len(inter) < 3:
-        return 0.0
-    # Signed distance from a point (s, t) on base's plane to other's plane.
-    c0 = dot(sub(base["origin"], other["origin"]), other["normal"])
-    cs = dot(base["u"], other["normal"])
-    ct = dot(base["v"], other["normal"])
-    if abs(cs) < 1e-15 and abs(ct) < 1e-15:
-        if abs(c0) > tol:
-            return 0.0
-        return polygon_area(inter)
-    # -tol <= c0 + s*cs + t*ct <= tol
-    inter = clip_halfplane(inter, cs, ct, tol - c0)
-    inter = clip_halfplane(inter, -cs, -ct, tol + c0)
-    return polygon_area(inter)
-
-
-def face_area(face):
-    return polygon_area(face["hull"])
-
-
 def area_epsilon(fa, fb):
-    aa = face_area(fa)
-    bb = face_area(fb)
+    aa = fa["area"]
+    bb = fb["area"]
     small = aa if aa < bb else bb
     if small <= 0.0:
         return 0.0
     return small * AREA_REL_EPS
 
 
+def projected_hull(other, base):
+    """Project a convex hull onto base's plane. Order stays convex."""
+    origin = other["origin"]
+    u = other["u"]
+    v = other["v"]
+    bo = base["origin"]
+    bu = base["u"]
+    bv = base["v"]
+    out = []
+    for s, t in other["hull"]:
+        px = origin[0] + s * u[0] + t * v[0]
+        py = origin[1] + s * u[1] + t * v[1]
+        pz = origin[2] + s * u[2] + t * v[2]
+        dx = px - bo[0]
+        dy = py - bo[1]
+        dz = pz - bo[2]
+        out.append((
+            dx * bu[0] + dy * bu[1] + dz * bu[2],
+            dx * bv[0] + dy * bv[1] + dz * bv[2],
+        ))
+    signed = 0.0
+    n = len(out)
+    for i in xrange(n):
+        x1, y1 = out[i]
+        x2, y2 = out[(i + 1) % n]
+        signed += x1 * y2 - x2 * y1
+    if signed < 0.0:
+        out.reverse()
+    return out
+
+
+def _aabb2(poly):
+    minx = poly[0][0]
+    maxx = minx
+    miny = poly[0][1]
+    maxy = miny
+    for x, y in poly:
+        if x < minx:
+            minx = x
+        elif x > maxx:
+            maxx = x
+        if y < miny:
+            miny = y
+        elif y > maxy:
+            maxy = y
+    return minx, miny, maxx, maxy
+
+
+def overlap_on(base, other, tol):
+    """Area of other's projection on base, clipped to the tolerance gap."""
+    c0 = (
+        (base["origin"][0] - other["origin"][0]) * other["normal"][0]
+        + (base["origin"][1] - other["origin"][1]) * other["normal"][1]
+        + (base["origin"][2] - other["origin"][2]) * other["normal"][2]
+    )
+    bu = base["u"]
+    bv = base["v"]
+    on = other["normal"]
+    cs = bu[0] * on[0] + bu[1] * on[1] + bu[2] * on[2]
+    ct = bv[0] * on[0] + bv[1] * on[1] + bv[2] * on[2]
+    parallel = abs(cs) < 1e-12 and abs(ct) < 1e-12
+    if parallel and (c0 > tol or c0 < -tol):
+        return 0.0
+    other_hull = projected_hull(other, base)
+    if len(other_hull) < 3 or len(base["hull"]) < 3:
+        return 0.0
+    box = _aabb2(other_hull)
+    bb = base["aabb2"]
+    if box[2] < bb[0] or bb[2] < box[0] or box[3] < bb[1] or bb[3] < box[1]:
+        return 0.0
+    inter = clip_convex(base["hull"], other_hull)
+    if len(inter) < 3:
+        return 0.0
+    if parallel:
+        return polygon_area(inter)
+    inter = clip_halfplane(inter, cs, ct, tol - c0)
+    inter = clip_halfplane(inter, -cs, -ct, tol + c0)
+    return polygon_area(inter)
+
+
 def overlap_area(fa, fb, tol):
-    """Projected intersection area. The larger of the two projection planes."""
+    """Projected intersection area. The second plane is used only if the first misses."""
     on_a = overlap_on(fa, fb, tol)
-    on_b = overlap_on(fb, fa, tol)
-    if on_b > on_a:
-        return on_b
-    return on_a
+    if on_a > 0.0:
+        on_b = overlap_on(fb, fa, tol)
+        if on_b > on_a:
+            return on_b
+        return on_a
+    return overlap_on(fb, fa, tol)
 
 
 def angle_ok(fa, fb, dot_min):
-    return abs(dot(fa["normal"], fb["normal"])) >= dot_min
+    d = (
+        fa["normal"][0] * fb["normal"][0]
+        + fa["normal"][1] * fb["normal"][1]
+        + fa["normal"][2] * fb["normal"][2]
+    )
+    if d < 0.0:
+        d = -d
+    return d >= dot_min
 
 
 def faces_match(fa, fb, tol, dot_min):
@@ -365,7 +429,10 @@ def faces_match(fa, fb, tol, dot_min):
         return False
     if not aabb_hit(fa["aabb"], fb["aabb"], tol):
         return False
-    return overlap_area(fa, fb, tol) > area_epsilon(fa, fb)
+    eps = area_epsilon(fa, fb)
+    if overlap_on(fa, fb, tol) > eps:
+        return True
+    return overlap_on(fb, fa, tol) > eps
 
 
 def shell_face_toward(shell, other):
@@ -434,7 +501,7 @@ def ensure_coverage(faces_a, _adj_a, acc_a, faces_b, _adj_b, acc_b, tol, dot_min
 
 def face_fit(face, partners, tol, dot_min):
     """Overlap area over face area. Larger projected coverage wins."""
-    area = face_area(face)
+    area = face["area"]
     best = 0.0
     best_gap = tol
     for other in partners:
@@ -592,51 +659,167 @@ def remember_nodes(node_index, face, fid):
         node_index[(face["eid"], 6)] = list(face["nodes"])
 
 
-def keys_for(faces, indexes, partner_faces, partner_indexes, node_index, tol, dot_min):
-    partners = [partner_faces[i] for i in partner_indexes]
+def keys_for(faces, indexes, partner_faces, partner_of, scores_by_index, node_index):
     keys = set()
     scores = {}
     for i in indexes:
         face = faces[i]
-        if face["kind"] == "shell" and partners:
-            other = partners[0]
-            best = dist_centroids(face, other)
-            for p in partners[1:]:
-                d = dist_centroids(face, p)
-                if d < best:
-                    best = d
-                    other = p
-            fid = shell_face_toward(face, other)
+        partner = None
+        pi = partner_of.get(i)
+        if pi is not None:
+            partner = partner_faces[pi]
+        if face["kind"] == "shell" and partner is not None:
+            fid = shell_face_toward(face, partner)
         else:
             fid = face["fid"]
         key = (face["eid"], fid)
         keys.add(key)
-        scores[key] = face_fit(face, partners, tol, dot_min)
+        scores[key] = scores_by_index.get(i, (0.0, 0.0))
         remember_nodes(node_index, face, fid)
     return keys, scores
 
 
-def dist_centroids(a, b):
-    return length(sub(a["centroid"], b["centroid"]))
+class Broadphase(object):
+    """Uniform grid so each face is tested only against nearby faces."""
+
+    def __init__(self, faces, tol):
+        self.tol = tol
+        n = len(faces)
+        self.stamp = [0] * n
+        self.token = 0
+        self.grid = {}
+        self.oversized = []
+        self.cell = 1.0
+        self.inv = 1.0
+        if n == 0:
+            return
+        diags = []
+        for face in faces:
+            box = face["aabb"]
+            diags.append(max(box[3] - box[0], box[4] - box[1], box[5] - box[2]))
+        diags.sort()
+        cell = diags[n // 2]
+        if cell < tol * 2.0:
+            cell = tol * 2.0
+        if cell < 1e-9:
+            cell = 1e-9
+        self.cell = cell
+        inv = 1.0 / cell
+        self.inv = inv
+        for i, face in enumerate(faces):
+            box = face["aabb"]
+            ix0, iy0, iz0, ix1, iy1, iz1 = self._range(box)
+            span = (ix1 - ix0 + 1) * (iy1 - iy0 + 1) * (iz1 - iz0 + 1)
+            if span > 64:
+                self.oversized.append(i)
+                continue
+            grid = self.grid
+            for ix in xrange(ix0, ix1 + 1):
+                for iy in xrange(iy0, iy1 + 1):
+                    for iz in xrange(iz0, iz1 + 1):
+                        key = (ix, iy, iz)
+                        bucket = grid.get(key)
+                        if bucket is None:
+                            grid[key] = [i]
+                        else:
+                            bucket.append(i)
+
+    def _range(self, box):
+        inv = self.inv
+        tol = self.tol
+        return (
+            int(math.floor((box[0] - tol) * inv)),
+            int(math.floor((box[1] - tol) * inv)),
+            int(math.floor((box[2] - tol) * inv)),
+            int(math.floor((box[3] + tol) * inv)),
+            int(math.floor((box[4] + tol) * inv)),
+            int(math.floor((box[5] + tol) * inv)),
+        )
+
+    def query(self, box):
+        self.token += 1
+        token = self.token
+        stamp = self.stamp
+        ix0, iy0, iz0, ix1, iy1, iz1 = self._range(box)
+        grid = self.grid
+        out = []
+        for ix in xrange(ix0, ix1 + 1):
+            for iy in xrange(iy0, iy1 + 1):
+                for iz in xrange(iz0, iz1 + 1):
+                    bucket = grid.get((ix, iy, iz))
+                    if not bucket:
+                        continue
+                    for i in bucket:
+                        if stamp[i] != token:
+                            stamp[i] = token
+                            out.append(i)
+        for i in self.oversized:
+            if stamp[i] != token:
+                stamp[i] = token
+                out.append(i)
+        return out
+
+
+def _better(store, idx, frac, gap):
+    cand = (frac, -gap)
+    prev = store.get(idx)
+    if prev is None or cand > prev:
+        store[idx] = cand
 
 
 def seed_pairs(list_a, list_b, tol, dot_min, prog, frac, text):
     hits_a = set()
     hits_b = set()
-    checks = 0
-    total = max(1, len(list_a) * len(list_b))
+    score_a = {}
+    score_b = {}
+    partner_a = {}
+    partner_b = {}
+    bins = Broadphase(list_b, tol)
+    n_a = len(list_a)
     for ia, fa in enumerate(list_a):
-        for ib, fb in enumerate(list_b):
-            checks += 1
-            if checks % 500 == 0:
-                prog.set(
-                    frac,
-                    "%s  %d/%d face pairs" % (text, checks, total),
-                )
-            if faces_match(fa, fb, tol, dot_min):
-                hits_a.add(ia)
-                hits_b.add(ib)
-    return hits_a, hits_b
+        if ia % 40 == 0:
+            prog.set(frac, "%s  %d/%d faces" % (text, ia, n_a))
+        na = fa["normal"]
+        area_a = fa["area"]
+        for ib in bins.query(fa["aabb"]):
+            fb = list_b[ib]
+            if not aabb_hit(fa["aabb"], fb["aabb"], tol):
+                continue
+            nb = fb["normal"]
+            nd = na[0] * nb[0] + na[1] * nb[1] + na[2] * nb[2]
+            if nd < 0.0:
+                nd = -nd
+            if nd < dot_min:
+                continue
+            ov_a = overlap_on(fa, fb, tol)
+            eps = area_epsilon(fa, fb)
+            if ov_a <= eps:
+                ov_b = overlap_on(fb, fa, tol)
+                if ov_b <= eps:
+                    continue
+            else:
+                ov_b = overlap_on(fb, fa, tol)
+            hits_a.add(ia)
+            hits_b.add(ib)
+            gap = dot(sub(fa["origin"], fb["origin"]), fb["normal"])
+            if gap < 0.0:
+                gap = -gap
+            frac_a = (ov_a / area_a) if area_a > 0.0 else 0.0
+            if frac_a > 1.0:
+                frac_a = 1.0
+            area_b = fb["area"]
+            frac_b = (ov_b / area_b) if area_b > 0.0 else 0.0
+            if frac_b > 1.0:
+                frac_b = 1.0
+            prev_a = score_a.get(ia)
+            prev_b = score_b.get(ib)
+            _better(score_a, ia, frac_a, gap)
+            _better(score_b, ib, frac_b, gap)
+            if score_a.get(ia) != prev_a:
+                partner_a[ia] = ib
+            if score_b.get(ib) != prev_b:
+                partner_b[ib] = ia
+    return hits_a, hits_b, score_a, score_b, partner_a, partner_b
 
 
 def master_slave(name_a, hits_a, name_b, hits_b):
@@ -937,7 +1120,6 @@ def _run(tol_mm, tol_m, angle, dot_min, prog, comps):
             continue
         comp_faces[name] = {
             "faces": faces,
-            "adj": build_adjacency(faces),
             "aabb": aabb_union([f["aabb"] for f in faces]),
         }
 
@@ -968,21 +1150,16 @@ def _run(tol_mm, tol_m, angle, dot_min, prog, comps):
         prog.set(frac, text, force=True)
         if not aabb_hit(fa["aabb"], fb["aabb"], tol_m):
             continue
-        seeds_a, seeds_b = seed_pairs(fa["faces"], fb["faces"], tol_m, dot_min, prog, frac, text)
+        seeds_a, seeds_b, score_a, score_b, partner_a, partner_b = seed_pairs(
+            fa["faces"], fb["faces"], tol_m, dot_min, prog, frac, text)
         if not seeds_a or not seeds_b:
             continue
-        prog.set(frac + 0.01, "Coverage: %s / %s" % (na, nb), force=True)
-        ensure_coverage(
-            fa["faces"], fa["adj"], seeds_a,
-            fb["faces"], fb["adj"], seeds_b,
-            tol_m, dot_min,
-        )
-        keys_a, score_a = keys_for(
-            fa["faces"], seeds_a, fb["faces"], seeds_b, node_index, tol_m, dot_min)
-        keys_b, score_b = keys_for(
-            fb["faces"], seeds_b, fa["faces"], seeds_a, node_index, tol_m, dot_min)
+        keys_a, score_key_a = keys_for(
+            fa["faces"], seeds_a, fb["faces"], partner_a, score_a, node_index)
+        keys_b, score_key_b = keys_for(
+            fb["faces"], seeds_b, fa["faces"], partner_b, score_b, node_index)
         if keys_a and keys_b:
-            raw_pairs.append((na, nb, keys_a, keys_b, score_a, score_b))
+            raw_pairs.append((na, nb, keys_a, keys_b, score_key_a, score_key_b))
 
     prog.set(0.82, "Assigning nodes to a single contact set ...", force=True)
     pairs, removed_faces, dropped_contacts = resolve_exclusive(raw_pairs, node_index)
@@ -1089,6 +1266,17 @@ def _self_test():
     wide = quad([(0, 0, 0), (10, 0, 0), (10, 1, 0), (0, 1, 0)], 30, 1, (31, 32, 33, 34))
     cross = quad([(0.2, -10, 0), (0.8, -10, 0), (0.8, 10, 0), (0.2, 10, 0)], 31, 1, (35, 36, 37, 38))
     assert faces_match(wide, cross, 1e-6, dot15), "crossing faces overlap even if no node is inside"
+    small = []
+    for i in xrange(6):
+        small.append(quad(
+            [(i, 0, 0), (i + 1, 0, 0), (i + 1, 1, 0), (i, 1, 0)],
+            40 + i, 1, (50 + i, 60 + i, 70 + i, 80 + i),
+        ))
+    far = quad([(0, 0, 10), (1, 0, 10), (1, 1, 10), (0, 1, 10)], 32, 1, (39, 40, 41, 42))
+    bins = Broadphase(small + [far], 1e-6)
+    found = bins.query(small[0]["aabb"])
+    assert 0 in found, "broadphase must keep a touching face"
+    assert len(small) not in found, "broadphase must skip distant faces"
 
     # A long interface seeded at one end must still cover the far faces.
     chain = []
