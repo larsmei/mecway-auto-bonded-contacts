@@ -182,6 +182,7 @@ Edit these near the top of `AutoBondedContacts.py` if the defaults are wrong for
 
 ## Version
 
+1.0.7 — a bend stays one contact. Growth follows the surface and adds the facing partner face, not only faces already marked.
 1.0.6 — gaps in a contact patch are filled so the marked surface stays continuous.
 1.0.5 — every free face of a qualifying node is checked, not only the first.
 1.0.4 — a node counts by normal distance. Opposite faces are those with a projected overlap.

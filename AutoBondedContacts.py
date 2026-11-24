@@ -899,18 +899,16 @@ def projects_on(point, face, tol):
     return hull_outside(p2, face["hull"]) <= tol
 
 
-def grow_side(faces, adj, acc, score, partner_of, partner_faces, partner_acc, tol, dot_min):
-    """Fill holes so a contact patch stays one continuous surface."""
-    if not acc or not partner_acc:
+def grow_side(faces, adj, acc, score, partner_of, partner_faces, partner_acc, bins, tol, dot_min):
+    """Walk a smooth surface and add every face that still meets the partner."""
+    if not acc or not partner_faces:
         return
     pending = list(acc)
-    guard = 0
-    limit = len(faces) + 1
-    while pending and guard < limit:
-        guard += 1
+    seen = set(acc)
+    while pending:
         i = pending.pop()
         for j in adj[i]:
-            if j in acc:
+            if j in seen:
                 continue
             face = faces[j]
             if not angle_ok(face, faces[i], dot_min):
@@ -919,21 +917,29 @@ def grow_side(faces, adj, acc, score, partner_of, partner_faces, partner_acc, to
             samples.extend(face["pts"])
             chosen = None
             gap = tol
-            for ib in partner_acc:
+            for ib in bins.query(face["aabb"]):
                 other = partner_faces[ib]
                 if not angle_ok(face, other, dot_min):
                     continue
-                for point in samples:
-                    if projects_on(point, other, tol):
-                        chosen = ib
-                        gap = normal_gap(point, other)
-                        break
-                if chosen is not None:
-                    break
+                if not aabb_hit(face["aabb"], other["aabb"], tol):
+                    continue
+                hit = projected_overlap(face, other, tol) > 0.0
+                if not hit:
+                    for point in samples:
+                        if projects_on(point, other, tol):
+                            hit = True
+                            gap = normal_gap(point, other)
+                            break
+                if not hit:
+                    continue
+                chosen = ib
+                break
             if chosen is None:
                 continue
+            seen.add(j)
             acc.add(j)
             pending.append(j)
+            partner_acc.add(chosen)
             _better(score, j, 0.5, gap)
             if j not in partner_of:
                 partner_of[j] = chosen
@@ -942,12 +948,20 @@ def grow_side(faces, adj, acc, score, partner_of, partner_faces, partner_acc, to
 def seal_pair(faces_a, acc_a, score_a, partner_a, faces_b, acc_b, score_b, partner_b, tol, dot_min):
     adj_a = build_adjacency(faces_a)
     adj_b = build_adjacency(faces_b)
-    limit = 8
+    bins_a = Broadphase(faces_a, tol)
+    bins_b = Broadphase(faces_b, tol)
+    limit = len(faces_a) + len(faces_b) + 2
     for _ in xrange(limit):
         before_a = len(acc_a)
         before_b = len(acc_b)
-        grow_side(faces_a, adj_a, acc_a, score_a, partner_a, faces_b, acc_b, tol, dot_min)
-        grow_side(faces_b, adj_b, acc_b, score_b, partner_b, faces_a, acc_a, tol, dot_min)
+        grow_side(
+            faces_a, adj_a, acc_a, score_a, partner_a,
+            faces_b, acc_b, bins_b, tol, dot_min,
+        )
+        grow_side(
+            faces_b, adj_b, acc_b, score_b, partner_b,
+            faces_a, acc_a, bins_a, tol, dot_min,
+        )
         if len(acc_a) == before_a and len(acc_b) == before_b:
             break
 
@@ -1513,9 +1527,30 @@ def _self_test():
     side = quad([(1, 0, 0), (2, 0, 0), (2, 0, 1), (1, 0, 1)], 404, 2, (2, 5, 13, 14))
     row = [q0, q1, q2, side]
     acc = set([0, 2])
-    grow_side(row, build_adjacency(row), acc, {}, {}, [plate], set([0]), 1e-6, dot15)
+    grow_side(
+        row, build_adjacency(row), acc, {}, {},
+        [plate], set([0]), Broadphase([plate], 1e-6), 1e-6, dot15,
+    )
     assert 1 in acc, "a gap in a continuous surface must be filled"
     assert 3 not in acc, "a perpendicular face must not be filled in"
+
+    def arc_face(index, radius, eid, node0):
+        a0 = index * 10.0 * math.pi / 180.0
+        a1 = (index + 1) * 10.0 * math.pi / 180.0
+        def point(ang, y):
+            return (radius * math.sin(ang), y, radius * math.cos(ang))
+        return quad(
+            [point(a0, 0.0), point(a1, 0.0), point(a1, 0.2), point(a0, 0.2)],
+            eid, 1,
+            (node0 + index, node0 + index + 1, node0 + 100 + index + 1, node0 + 100 + index),
+        )
+
+    inner = [arc_face(i, 1.0, 500 + i, 1000) for i in xrange(6)]
+    outer = [arc_face(i, 1.002, 800 + i, 2000) for i in xrange(6)]
+    acc_i = set([0])
+    acc_o = set([0])
+    seal_pair(inner, acc_i, {}, {}, outer, acc_o, {}, {}, 0.01, dot15)
+    assert len(acc_i) == 6 and len(acc_o) == 6, "a bend must stay one continuous contact"
 
     def scored(keys, score):
         return dict((key, score) for key in keys)
