@@ -273,38 +273,6 @@ def clip_convex(subject, clip):
     return output
 
 
-def clip_halfplane(poly, nx, ny, limit):
-    """Keep nx * x + ny * y <= limit."""
-    if not poly:
-        return []
-    def inside(p):
-        return nx * p[0] + ny * p[1] <= limit + 1e-14
-
-    def crossing(p, q):
-        vp = nx * p[0] + ny * p[1]
-        vq = nx * q[0] + ny * q[1]
-        denom = vq - vp
-        if denom < 1e-18 and denom > -1e-18:
-            return q
-        t = (limit - vp) / denom
-        return (p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1]))
-
-    output = []
-    s = poly[-1]
-    s_in = inside(s)
-    for e in poly:
-        e_in = inside(e)
-        if e_in:
-            if not s_in:
-                output.append(crossing(s, e))
-            output.append(e)
-        elif s_in:
-            output.append(crossing(s, e))
-        s = e
-        s_in = e_in
-    return output
-
-
 def projected_hull(other, base):
     """Project a convex hull onto base's plane. Order stays convex."""
     origin = other["origin"]
@@ -353,21 +321,35 @@ def _aabb2(poly):
     return minx, miny, maxx, maxy
 
 
-def overlap_on(base, other, tol):
-    """Area of other's projection on base, clipped to the tolerance gap."""
-    c0 = (
-        (base["origin"][0] - other["origin"][0]) * other["normal"][0]
-        + (base["origin"][1] - other["origin"][1]) * other["normal"][1]
-        + (base["origin"][2] - other["origin"][2]) * other["normal"][2]
-    )
-    bu = base["u"]
-    bv = base["v"]
-    on = other["normal"]
-    cs = bu[0] * on[0] + bu[1] * on[1] + bu[2] * on[2]
-    ct = bv[0] * on[0] + bv[1] * on[1] + bv[2] * on[2]
-    parallel = abs(cs) < 1e-12 and abs(ct) < 1e-12
-    if parallel and (c0 > tol or c0 < -tol):
+def overlap_gap(inter, c0, cs, ct):
+    """Smallest plane distance over the overlap. Zero if the planes cross it."""
+    best = None
+    positive = False
+    negative = False
+    for s, t in inter:
+        dist = c0 + s * cs + t * ct
+        if dist > 1e-15:
+            positive = True
+        elif dist < -1e-15:
+            negative = True
+        else:
+            return 0.0
+        if dist < 0.0:
+            dist = -dist
+        if best is None or dist < best:
+            best = dist
+    if positive and negative:
         return 0.0
+    if best is None:
+        return 0.0
+    return best
+
+
+def overlap_on(base, other, tol):
+    """Projected overlap area. A small overlap counts when it lies within the tolerance.
+
+    The gap is measured on the overlap itself, not at the first node of the face.
+    """
     other_hull = projected_hull(other, base)
     if len(other_hull) < 3 or len(base["hull"]) < 3:
         return 0.0
@@ -378,11 +360,22 @@ def overlap_on(base, other, tol):
     inter = clip_convex(base["hull"], other_hull)
     if len(inter) < 3:
         return 0.0
-    if parallel:
-        return polygon_area(inter)
-    inter = clip_halfplane(inter, cs, ct, tol - c0)
-    inter = clip_halfplane(inter, -cs, -ct, tol + c0)
-    return polygon_area(inter)
+    area = polygon_area(inter)
+    if area <= 0.0:
+        return 0.0
+    on = other["normal"]
+    c0 = (
+        (base["origin"][0] - other["origin"][0]) * on[0]
+        + (base["origin"][1] - other["origin"][1]) * on[1]
+        + (base["origin"][2] - other["origin"][2]) * on[2]
+    )
+    bu = base["u"]
+    bv = base["v"]
+    cs = bu[0] * on[0] + bu[1] * on[1] + bu[2] * on[2]
+    ct = bv[0] * on[0] + bv[1] * on[1] + bv[2] * on[2]
+    if overlap_gap(inter, c0, cs, ct) > tol:
+        return 0.0
+    return area
 
 
 def overlap_area(fa, fb, tol):
@@ -942,8 +935,9 @@ USAGE = (
     "You will be asked for a position tolerance in mm and a maximum "
     "inclination in degrees (default 15).\n"
     "A window shows the progress.\n\n"
-    "A face is a contact face when the projected overlap is greater than zero.\n"
-    "Distance and angle are the only reasons to leave a face out.\n"
+    "A face is a contact face when the projected overlap is greater than zero, "
+    "including a small overlap. Distance and angle are the only exclusions. "
+    "The distance is taken on the overlap, not at the first node.\n"
     "Each node belongs to only one contact set. Beams are ignored.\n\n"
     "Save the model first. After the run, reload it and do not save before that."
 )
@@ -1189,6 +1183,21 @@ def _self_test():
     long_a = quad([(0, 0, 0), (4, 0, 0), (4, 1, 0), (0, 1, 0)], 50, 1, (61, 62, 63, 64))
     long_b = quad(rotate_y([(0, 0, 0), (4, 0, 0), (4, 1, 0), (0, 1, 0)], 10.0), 51, 1, (65, 66, 67, 68))
     assert faces_match(long_a, long_b, 0.05, dot15), "overlap above zero counts without using the nodes"
+
+    # A small overlap at the far end still counts. The first node is outside the tolerance.
+    ang = 1.0 * math.pi / 180.0
+    ca = math.cos(ang)
+    sa = math.sin(ang)
+    def tilt_about_far(p):
+        x = p[0] - 90.0
+        z = p[2]
+        return (ca * x + sa * z + 90.0, p[1], -sa * x + ca * z)
+    plate = quad([(0, 0, 0), (100, 0, 0), (100, 10, 0), (0, 10, 0)], 70, 1, (71, 72, 73, 74))
+    sliver = quad(
+        [tilt_about_far(p) for p in ((89, 2, 0.01), (91, 2, 0.01), (91, 4, 0.01), (89, 4, 0.01))],
+        71, 1, (75, 76, 77, 78),
+    )
+    assert faces_match(plate, sliver, 0.05, dot15), "a small overlap within the tolerance must count"
 
     # A1 only shares an edge. Nodes are on the plane, but there is no area overlap.
     a0 = quad([(0, 0, 0), (0, 1, 0), (0, 1, 1), (0, 0, 1)], 10, 1, (1, 2, 3, 4))

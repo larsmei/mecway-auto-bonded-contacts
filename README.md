@@ -76,7 +76,7 @@ Every free face is compared with every opposite face whose bounding box lies wit
 A pair is a contact when the projected overlap is greater than zero. Distance and angle are the only exclusions:
 
 - The angle between the planes is at most the value you entered. The test is `|n1 · n2| >= cos(angle)`. Opposite normals still match. 15° is about `|n1 · n2| >= 0.9659`.
-- The overlap lies within the tolerance gap. Parts of the faces farther apart than that are cut away. If nothing remains, there is no contact.
+- The overlap lies within the tolerance. The gap is measured on the overlap itself, not at the first node of the face. A small overlap is enough. If the whole overlap is farther than the tolerance, there is no contact.
 - Nodes are not projected and do not decide the pair. A shared edge has no area and is not a contact.
 
 ### 3. What is kept
@@ -183,6 +183,7 @@ Edit these near the top of `AutoBondedContacts.py` if the defaults are wrong for
 
 ## Version
 
+1.0.10 — a small overlap counts. The gap is measured on the overlap, not at the first node.
 1.0.9 — faces only. Overlap greater than zero is a contact. Distance and angle are the only exclusions. No node projection.
 1.0.8 — contact search rewritten. Every face whose box is in range is tested. A node is no longer required to fall inside the partner outline.
 1.0.7 — a bend stays one contact. Growth follows the surface and adds the facing partner face, not only faces already marked.
