@@ -73,11 +73,11 @@ For each solid element the script asks Mecway for every face (`mw.face_nodes`). 
 
 Every free face is compared with every opposite face whose bounding box lies within the tolerance. The grid only limits that search. It does not decide the contact. A node is never reduced to one face: each free face that uses the node is tested on its own.
 
-A pair is a contact when all of the following are true:
+A pair is a contact when the projected overlap is greater than zero. Distance and angle are the only exclusions:
 
-- The angle between their planes is at most the value you entered. The test is `|n1 · n2| >= cos(angle)`. Opposite normals still match, because only the absolute value is used. 15° is about `|n1 · n2| >= 0.9659`.
-- At least one node is within the tolerance of the other face, measured along that face normal. The node does not have to land inside the face outline.
-- The projected areas overlap. A shared edge has no area and is not a contact.
+- The angle between the planes is at most the value you entered. The test is `|n1 · n2| >= cos(angle)`. Opposite normals still match. 15° is about `|n1 · n2| >= 0.9659`.
+- The overlap lies within the tolerance gap. Parts of the faces farther apart than that are cut away. If nothing remains, there is no contact.
+- Nodes are not projected and do not decide the pair. A shared edge has no area and is not a contact.
 
 ### 3. What is kept
 
@@ -183,6 +183,7 @@ Edit these near the top of `AutoBondedContacts.py` if the defaults are wrong for
 
 ## Version
 
+1.0.9 — faces only. Overlap greater than zero is a contact. Distance and angle are the only exclusions. No node projection.
 1.0.8 — contact search rewritten. Every face whose box is in range is tested. A node is no longer required to fall inside the partner outline.
 1.0.7 — a bend stays one contact. Growth follows the surface and adds the facing partner face, not only faces already marked.
 1.0.6 — gaps in a contact patch are filled so the marked surface stays continuous.

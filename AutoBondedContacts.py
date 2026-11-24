@@ -28,8 +28,6 @@ def itervalues(d):
 
 CONTACT_TYPE = "bondedce"
 DEFAULT_ANGLE_DEG = 15.0
-# Ignore only numerical slivers. Any real projected overlap adds the face.
-AREA_REL_EPS = 1e-8
 
 SOLID_FACE_COUNT = {
     "tet4": 4,
@@ -307,20 +305,6 @@ def clip_halfplane(poly, nx, ny, limit):
     return output
 
 
-def project_to_face(point, face):
-    d = sub(point, face["origin"])
-    return (dot(d, face["u"]), dot(d, face["v"]))
-
-
-def area_epsilon(fa, fb):
-    aa = fa["area"]
-    bb = fb["area"]
-    small = aa if aa < bb else bb
-    if small <= 0.0:
-        return 0.0
-    return small * AREA_REL_EPS
-
-
 def projected_hull(other, base):
     """Project a convex hull onto base's plane. Order stays convex."""
     origin = other["origin"]
@@ -423,45 +407,23 @@ def angle_ok(fa, fb, dot_min):
     return d >= dot_min
 
 
-def normal_gap(point, face):
-    """Distance from a node to the face plane, along the face normal."""
-    normal = face["normal"]
-    ox, oy, oz = face["origin"]
-    gap = (point[0] - ox) * normal[0] + (point[1] - oy) * normal[1] + (point[2] - oz) * normal[2]
+def face_gap(fa, fb):
+    """Distance between the two face planes. Not a node projection."""
+    normal = fb["normal"]
+    ox, oy, oz = fb["origin"]
+    gap = (fa["origin"][0] - ox) * normal[0] + (fa["origin"][1] - oy) * normal[1] + (fa["origin"][2] - oz) * normal[2]
     if gap < 0.0:
         return -gap
     return gap
 
 
-def nodes_within_normal(source, target, tol):
-    """Smallest normal gap of a source node to the target plane, or None."""
-    best = None
-    for point in source["pts"]:
-        gap = normal_gap(point, target)
-        if gap > tol:
-            continue
-        if best is None or gap < best:
-            best = gap
-    return best
-
-
-def projected_overlap(fa, fb, tol):
-    eps = area_epsilon(fa, fb)
-    area = overlap_area(fa, fb, tol)
-    if area <= eps:
-        return 0.0
-    return area
-
-
 def faces_match(fa, fb, tol, dot_min):
-    """Node within the normal tolerance, then a real projected overlap."""
+    """Overlap greater than zero. Distance and angle are the only exclusions."""
     if not angle_ok(fa, fb, dot_min):
         return False
     if not aabb_hit(fa["aabb"], fb["aabb"], tol):
         return False
-    if nodes_within_normal(fa, fb, tol) is None and nodes_within_normal(fb, fa, tol) is None:
-        return False
-    return projected_overlap(fa, fb, tol) > 0.0
+    return overlap_area(fa, fb, tol) > 0.0
 
 
 def shell_face_toward(shell, other):
@@ -761,15 +723,10 @@ def record_hit(ia, ib, fa, fb, area, gap, hits_a, hits_b, score_a, score_b, part
 
 
 def find_interface(list_a, list_b, tol, dot_min, prog, frac, text):
-    """Contact faces between two components.
+    """Every face with a projected overlap above zero is a contact face.
 
-    Every free face is compared with every opposite face whose box lies
-    within the tolerance. A node is never reduced to a single face: each
-    face that uses the node is a separate entry and is tested on its own.
-
-    A pair is kept only when all three of the following are true:
-    the angle is within the limit, at least one node is within the normal
-    tolerance of the other plane, and the projected areas overlap.
+    Angle and distance are the only reasons to reject that overlap.
+    Nodes are not projected and do not decide the pair.
     """
     hits_a = set()
     hits_b = set()
@@ -786,17 +743,16 @@ def find_interface(list_a, list_b, tol, dot_min, prog, frac, text):
             prog.set(frac, "%s  %d/%d faces" % (text, ia, n_a))
         for ib in bins.query(fa["aabb"]):
             fb = list_b[ib]
-            if not faces_match(fa, fb, tol, dot_min):
+            if not angle_ok(fa, fb, dot_min):
                 continue
-            area = projected_overlap(fa, fb, tol)
-            gap_a = nodes_within_normal(fa, fb, tol)
-            gap_b = nodes_within_normal(fb, fa, tol)
-            if gap_a is None:
-                gap = gap_b if gap_b is not None else 0.0
-            elif gap_b is None or gap_a <= gap_b:
-                gap = gap_a
-            else:
-                gap = gap_b
+            if not aabb_hit(fa["aabb"], fb["aabb"], tol):
+                continue
+            area = overlap_area(fa, fb, tol)
+            if area <= 0.0:
+                continue
+            gap_a = face_gap(fa, fb)
+            gap_b = face_gap(fb, fa)
+            gap = gap_a if gap_a <= gap_b else gap_b
             record_hit(
                 ia, ib, fa, fb, area, gap,
                 hits_a, hits_b, score_a, score_b, partner_a, partner_b,
@@ -986,11 +942,8 @@ USAGE = (
     "You will be asked for a position tolerance in mm and a maximum "
     "inclination in degrees (default 15).\n"
     "A window shows the progress.\n\n"
-    "Every free face is tested against the opposite faces within the tolerance.\n"
-    "A node counts when its normal distance is within the tolerance. "
-    "Every free face of that node is tested, not only the first.\n"
-    "The face is kept when the projected areas overlap and the angle "
-    "is within the given limit.\n"
+    "A face is a contact face when the projected overlap is greater than zero.\n"
+    "Distance and angle are the only reasons to leave a face out.\n"
     "Each node belongs to only one contact set. Beams are ignored.\n\n"
     "Save the model first. After the run, reload it and do not save before that."
 )
@@ -1231,6 +1184,11 @@ def _self_test():
     tilt20 = quad(rotate_y(b_px, 20.0), 4, 1, (31, 32, 33, 34))
     assert faces_match(fa, tilt10, 0.002, dot15), "10 degrees must still match"
     assert not faces_match(fa, tilt20, 0.002, dot15), "20 degrees is too steep"
+
+    # Corners are farther than the tolerance. The overlapping middle still counts.
+    long_a = quad([(0, 0, 0), (4, 0, 0), (4, 1, 0), (0, 1, 0)], 50, 1, (61, 62, 63, 64))
+    long_b = quad(rotate_y([(0, 0, 0), (4, 0, 0), (4, 1, 0), (0, 1, 0)], 10.0), 51, 1, (65, 66, 67, 68))
+    assert faces_match(long_a, long_b, 0.05, dot15), "overlap above zero counts without using the nodes"
 
     # A1 only shares an edge. Nodes are on the plane, but there is no area overlap.
     a0 = quad([(0, 0, 0), (0, 1, 0), (0, 1, 1), (0, 0, 1)], 10, 1, (1, 2, 3, 4))
