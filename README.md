@@ -52,7 +52,7 @@ All dialogs are English.
 
 | Step | What you see |
 | --- | --- |
-| Start | Short description of the script, the two inputs, the projected-area rule, and the reload warning. |
+| Start | Short description of the script, the two inputs, the node-projection rule, and the reload warning. |
 | Bad mesh | `No suitable mesh.` plus the reason: no elements, only beams, or fewer than two solid/shell components. |
 | Tolerance | `Position tolerance in mm (e.g. 0.5):` |
 | Angle | `Max. face inclination in degrees [15]:` |
@@ -75,11 +75,11 @@ Two free faces, one on each component, become a seed when all of the following a
 
 - The angle between their planes is at most the value you entered. The test is `|n1 · n2| >= cos(angle)`. Opposite normals still match, because only the absolute value is used. 15° is about `|n1 · n2| >= 0.9659`.
 - Their bounding boxes overlap within the tolerance.
-- The projection of one face onto the other has a real intersection area, and that intersection lies within the tolerance gap. The area is the polygon clip of the two convex hulls, then clipped again to the slab `|distance to the other plane| <= tolerance`. A shared edge has zero area and is not a contact. Nodes and centroids are not the test: a face is kept as soon as the projected areas overlap, even when no node of either face falls inside the other.
+- A node of one face projects onto the other. The node is dropped onto that face's plane. It counts when the gap is within the tolerance and the projected point lies on the face, or within the same tolerance past the edge. The boundary counts. A shared edge alone is not required: the face that owns the projecting node is added, and so is the face that receives it. This is what grows a contact across a long interface, including the far end.
 
 ### 3. Coverage
 
-After the seeds, every remaining free face of either component is tested the same way against the partner's free faces. It is added as soon as the projected overlap area is above a numerical sliver (`AREA_REL_EPS = 1e-8` of the smaller face). The face does not have to share an edge with a face already in the set. Both sides are scanned until nothing new appears, so the far end of a long interface is included.
+After the seeds, every remaining free face is tested the same way. A face is added as soon as one of its nodes projects onto a partner face, or a partner node projects onto it, within the tolerance. No separate area clip is used.
 
 ### 4. One node, one contact
 
@@ -87,7 +87,7 @@ A node must not appear in more than one contact set. The same component can mate
 
 Each accepted face is scored against its partner:
 
-- primary: projected overlap area divided by the face area;
+- primary: fraction of the face nodes that project onto the partner;
 - secondary: smaller gap between the two planes wins ties.
 
 Faces are assigned in score order. If any node of a face is already owned by another contact, the whole face is dropped from this contact. It cannot be split. If either side of a contact becomes empty, that contact is discarded and reported in the summary.
@@ -149,7 +149,8 @@ If WinForms cannot be loaded, the search still runs; you only lose the live bar.
 - Plane elements that Mecway reports as `tri3` or `quad4` are treated as shells.
 - The angle is measured between each candidate face and the partner face. A face past the limit is ignored even when a neighbour is still inside it.
 - Very large tolerances pull in every face whose projection still meets the partner inside that gap.
-- A shared edge or a corner touch has no area and is ignored. Any positive projected overlap is enough.
+- A node within the tolerance past an edge still pulls that face into the contact. A node farther outside does not.
+- A pure crossing, where the areas overlap but no node projects onto the other face, is not a contact.
 - Detection is geometric. It does not read existing Mecway contacts, named selections, or material ids.
 - The script is IronPython 2.7 inside Mecway and CPython 3 outside Mecway. Outside Mecway, `python AutoBondedContacts.py` runs the geometry self-test and does not need a model.
 
@@ -177,10 +178,10 @@ Edit these near the top of `AutoBondedContacts.py` if the defaults are wrong for
 | --- | --- | --- |
 | `CONTACT_TYPE` | `bondedce` | Mecway contact type written into `<contact2>`. |
 | `DEFAULT_ANGLE_DEG` | `15` | Shown in the angle prompt. Empty input keeps this value. |
-| `AREA_REL_EPS` | `1e-8` | Fraction of the smaller face area below which a projected overlap is treated as numerical noise. |
 
 ## Version
 
+1.0.3 — contact finding uses node projection. A face is added when a node lands on the partner within the tolerance, including just past the edge.
 1.0.2 — broadphase grid. Each face is tested only against nearby faces, and the overlap area is computed once.
 1.0.1 — coverage is the projected polygon intersection, not a node count. A face is added as soon as that area is real.
 1.0.0 — first release. Solids and shells, angle limit, progress window, exclusive nodes, `.liml` bonded contacts.

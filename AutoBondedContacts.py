@@ -423,16 +423,75 @@ def angle_ok(fa, fb, dot_min):
     return d >= dot_min
 
 
+def hull_outside(p2, hull):
+    """In-plane distance outside a convex hull. 0 when inside or on the boundary."""
+    nearest = 1e300
+    outside = False
+    n = len(hull)
+    for i in xrange(n):
+        a = hull[i]
+        b = hull[(i + 1) % n]
+        cr = (b[0] - a[0]) * (p2[1] - a[1]) - (b[1] - a[1]) * (p2[0] - a[0])
+        if cr < -1e-12:
+            outside = True
+            de = dist_point_seg_2d(p2, a, b)
+            if de < nearest:
+                nearest = de
+    if not outside:
+        return 0.0
+    return nearest
+
+
+def node_projects(point, face, tol):
+    """Project one node onto a face. Hit when it lands on the face within tolerance."""
+    normal = face["normal"]
+    ox, oy, oz = face["origin"]
+    dx = point[0] - ox
+    dy = point[1] - oy
+    dz = point[2] - oz
+    plane = dx * normal[0] + dy * normal[1] + dz * normal[2]
+    if plane > tol or plane < -tol:
+        return None
+    u = face["u"]
+    v = face["v"]
+    p2 = (
+        dx * u[0] + dy * u[1] + dz * u[2],
+        dx * v[0] + dy * v[1] + dz * v[2],
+    )
+    if hull_outside(p2, face["hull"]) > tol:
+        return None
+    if plane < 0.0:
+        return -plane
+    return plane
+
+
+def projection_score(source, target, tol):
+    """Fraction of source nodes that project onto target, and their mean gap."""
+    pts = source["pts"]
+    if not pts:
+        return None
+    ok = 0
+    gap_sum = 0.0
+    for point in pts:
+        gap = node_projects(point, target, tol)
+        if gap is None:
+            continue
+        ok += 1
+        gap_sum += gap
+    if ok == 0:
+        return None
+    return (ok / float(len(pts)), gap_sum / float(ok))
+
+
 def faces_match(fa, fb, tol, dot_min):
-    """True when the projected areas overlap, not merely when nodes fall inside."""
+    """True when a node of one face projects onto the other."""
     if not angle_ok(fa, fb, dot_min):
         return False
     if not aabb_hit(fa["aabb"], fb["aabb"], tol):
         return False
-    eps = area_epsilon(fa, fb)
-    if overlap_on(fa, fb, tol) > eps:
+    if projection_score(fa, fb, tol) is not None:
         return True
-    return overlap_on(fb, fa, tol) > eps
+    return projection_score(fb, fa, tol) is not None
 
 
 def shell_face_toward(shell, other):
@@ -469,7 +528,11 @@ def partners_near(face, partner_faces, tol):
 
 def overlaps_any(face, partners, tol, dot_min):
     for other in partners:
-        if angle_ok(face, other, dot_min) and overlap_area(face, other, tol) > area_epsilon(face, other):
+        if not angle_ok(face, other, dot_min):
+            continue
+        if projection_score(face, other, tol) is not None:
+            return True
+        if projection_score(other, face, tol) is not None:
             return True
     return False
 
@@ -780,7 +843,6 @@ def seed_pairs(list_a, list_b, tol, dot_min, prog, frac, text):
         if ia % 40 == 0:
             prog.set(frac, "%s  %d/%d faces" % (text, ia, n_a))
         na = fa["normal"]
-        area_a = fa["area"]
         for ib in bins.query(fa["aabb"]):
             fb = list_b[ib]
             if not aabb_hit(fa["aabb"], fb["aabb"], tol):
@@ -791,26 +853,22 @@ def seed_pairs(list_a, list_b, tol, dot_min, prog, frac, text):
                 nd = -nd
             if nd < dot_min:
                 continue
-            ov_a = overlap_on(fa, fb, tol)
-            eps = area_epsilon(fa, fb)
-            if ov_a <= eps:
-                ov_b = overlap_on(fb, fa, tol)
-                if ov_b <= eps:
-                    continue
-            else:
-                ov_b = overlap_on(fb, fa, tol)
+            sa = projection_score(fa, fb, tol)
+            sb = projection_score(fb, fa, tol)
+            if sa is None and sb is None:
+                continue
             hits_a.add(ia)
             hits_b.add(ib)
-            gap = dot(sub(fa["origin"], fb["origin"]), fb["normal"])
-            if gap < 0.0:
-                gap = -gap
-            frac_a = (ov_a / area_a) if area_a > 0.0 else 0.0
-            if frac_a > 1.0:
-                frac_a = 1.0
-            area_b = fb["area"]
-            frac_b = (ov_b / area_b) if area_b > 0.0 else 0.0
-            if frac_b > 1.0:
-                frac_b = 1.0
+            if sa is not None:
+                frac_a, gap = sa
+            else:
+                frac_a, gap = sb
+            if sb is not None:
+                frac_b, gap_b = sb
+                if sa is None or gap_b < gap:
+                    gap = gap_b
+            else:
+                frac_b = frac_a
             prev_a = score_a.get(ia)
             prev_b = score_b.get(ib)
             _better(score_a, ia, frac_a, gap)
@@ -1004,7 +1062,8 @@ USAGE = (
     "You will be asked for a position tolerance in mm and a maximum "
     "inclination in degrees (default 15).\n"
     "A window shows the progress.\n\n"
-    "A face is added as soon as its projection overlaps the partner. "
+    "A face is added when one of its nodes projects onto the partner, "
+    "including nodes that fall within the tolerance past the edge. "
     "Each node belongs to only one contact set. Beams are ignored.\n\n"
     "Save the model first. After the run, reload it and do not save before that."
 )
@@ -1246,10 +1305,9 @@ def _self_test():
     assert faces_match(fa, tilt10, 0.002, dot15), "10 degrees must still match"
     assert not faces_match(fa, tilt20, 0.002, dot15), "20 degrees is too steep"
 
-    # A1 only shares the edge y=1 with B, so the projected area is zero.
+    # A1 sticks out by 0.02. With tolerance 0.03 its nodes still project onto B.
     a0 = quad([(0, 0, 0), (0, 1, 0), (0, 1, 1), (0, 0, 1)], 10, 1, (1, 2, 3, 4))
     a1 = quad([(0, 1, 0), (0, 1.02, 0), (0, 1.02, 1), (0, 1, 1)], 11, 1, (2, 5, 6, 3))
-    # A2 crosses the interior of B. No node or centroid of either face lies in the other.
     a2 = quad([(0, 0.2, 0), (0, 0.8, 0), (0, 0.8, 1), (0, 0.2, 1)], 14, 1, (21, 22, 23, 24))
     b0 = quad([(0, 0, 0), (0, 1, 0), (0, 1, 1), (0, 0, 1)], 12, 1, (7, 8, 9, 10))
     side = quad([(0, 0, 0), (0.5, 0, 0), (0.5, 0, 1), (0, 0, 1)], 13, 2, (1, 11, 12, 4))
@@ -1260,12 +1318,14 @@ def _self_test():
     acc_a = set([0])
     acc_b = set([0])
     ensure_coverage(faces_a, adj_a, acc_a, faces_b, adj_b, acc_b, 0.03, dot15)
-    assert 1 not in acc_a, "a shared edge is not an area overlap"
+    assert 1 in acc_a, "nodes within tolerance must add the next face"
     assert 2 not in acc_a, "perpendicular face must not be added"
-    assert 3 in acc_a, "projected area overlap must add the face"
+    assert 3 in acc_a, "nodes that project inside must add the face"
     wide = quad([(0, 0, 0), (10, 0, 0), (10, 1, 0), (0, 1, 0)], 30, 1, (31, 32, 33, 34))
     cross = quad([(0.2, -10, 0), (0.8, -10, 0), (0.8, 10, 0), (0.2, 10, 0)], 31, 1, (35, 36, 37, 38))
-    assert faces_match(wide, cross, 1e-6, dot15), "crossing faces overlap even if no node is inside"
+    assert not faces_match(wide, cross, 1e-6, dot15), "no node projects onto the other face"
+    landed = quad([(-0.5, -1, 0), (1, -1, 0), (1, 2, 0), (-0.5, 2, 0)], 33, 1, (43, 44, 45, 46))
+    assert faces_match(wide, landed, 1e-6, dot15), "a node that lands on the face is a contact"
     small = []
     for i in xrange(6):
         small.append(quad(
