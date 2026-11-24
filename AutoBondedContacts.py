@@ -28,8 +28,8 @@ def itervalues(d):
 
 CONTACT_TYPE = "bondedce"
 DEFAULT_ANGLE_DEG = 15.0
-# Share of nodes on the opposite side at which a neighbouring face is added.
-COVER_MIN = 0.05
+# Ignore only numerical slivers. Any real projected overlap adds the face.
+AREA_REL_EPS = 1e-8
 
 SOLID_FACE_COUNT = {
     "tet4": 4,
@@ -215,49 +215,144 @@ def prepare_face(eid, fid, pts, kind, nodes):
     }
 
 
-def point_face_metrics(point, face):
-    """(distance to the plane, in-plane distance to the boundary; 0 if inside)."""
+def polygon_area(poly):
+    n = len(poly)
+    if n < 3:
+        return 0.0
+    acc = 0.0
+    for i in xrange(n):
+        x1, y1 = poly[i]
+        x2, y2 = poly[(i + 1) % n]
+        acc += x1 * y2 - x2 * y1
+    if acc < 0.0:
+        acc = -acc
+    return 0.5 * acc
+
+
+def clip_convex(subject, clip):
+    """Sutherland-Hodgman. Both polygons are convex and counter-clockwise."""
+    def is_inside(p, a, b):
+        return (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]) >= -1e-14
+
+    def crossing(p, q, a, b):
+        rx = q[0] - p[0]
+        ry = q[1] - p[1]
+        sx = b[0] - a[0]
+        sy = b[1] - a[1]
+        denom = rx * sy - ry * sx
+        if denom < 1e-18 and denom > -1e-18:
+            return q
+        t = ((a[0] - p[0]) * sy - (a[1] - p[1]) * sx) / denom
+        return (p[0] + t * rx, p[1] + t * ry)
+
+    output = list(subject)
+    if len(output) < 3 or len(clip) < 3:
+        return []
+    nclip = len(clip)
+    for i in xrange(nclip):
+        if not output:
+            return []
+        a = clip[i]
+        b = clip[(i + 1) % nclip]
+        incoming = output
+        output = []
+        s = incoming[-1]
+        s_in = is_inside(s, a, b)
+        for e in incoming:
+            e_in = is_inside(e, a, b)
+            if e_in:
+                if not s_in:
+                    output.append(crossing(s, e, a, b))
+                output.append(e)
+            elif s_in:
+                output.append(crossing(s, e, a, b))
+            s = e
+            s_in = e_in
+    return output
+
+
+def clip_halfplane(poly, nx, ny, limit):
+    """Keep nx * x + ny * y <= limit."""
+    if not poly:
+        return []
+    def inside(p):
+        return nx * p[0] + ny * p[1] <= limit + 1e-14
+
+    def crossing(p, q):
+        vp = nx * p[0] + ny * p[1]
+        vq = nx * q[0] + ny * q[1]
+        denom = vq - vp
+        if denom < 1e-18 and denom > -1e-18:
+            return q
+        t = (limit - vp) / denom
+        return (p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1]))
+
+    output = []
+    s = poly[-1]
+    s_in = inside(s)
+    for e in poly:
+        e_in = inside(e)
+        if e_in:
+            if not s_in:
+                output.append(crossing(s, e))
+            output.append(e)
+        elif s_in:
+            output.append(crossing(s, e))
+        s = e
+        s_in = e_in
+    return output
+
+
+def project_to_face(point, face):
     d = sub(point, face["origin"])
-    plane = abs(dot(d, face["normal"]))
-    p2 = (dot(d, face["u"]), dot(d, face["v"]))
-    hull = face["hull"]
-    min_edge = 1e300
-    inside = True
-    for i in xrange(len(hull)):
-        a = hull[i]
-        b = hull[(i + 1) % len(hull)]
-        cr = (b[0] - a[0]) * (p2[1] - a[1]) - (b[1] - a[1]) * (p2[0] - a[0])
-        if cr < -1e-9:
-            inside = False
-        de = dist_point_seg_2d(p2, a, b)
-        if de < min_edge:
-            min_edge = de
-    outside = 0.0 if inside else min_edge
-    return plane, outside
+    return (dot(d, face["u"]), dot(d, face["v"]))
 
 
-def strictly_inside(point, face, tol):
-    plane, outside = point_face_metrics(point, face)
-    if plane > tol or outside > 1e-9:
-        return False
-    d = sub(point, face["origin"])
-    p2 = (dot(d, face["u"]), dot(d, face["v"]))
-    hull = face["hull"]
-    min_edge = 1e300
-    for i in xrange(len(hull)):
-        a = hull[i]
-        b = hull[(i + 1) % len(hull)]
-        de = dist_point_seg_2d(p2, a, b)
-        if de < min_edge:
-            min_edge = de
-    return min_edge > 1e-9
+def overlap_on(base, other, tol):
+    """Area of other's projection on base, clipped to the tolerance gap."""
+    projected = [project_to_face(p, base) for p in other["pts"]]
+    other_hull = convex_hull(projected)
+    if len(other_hull) < 3 or len(base["hull"]) < 3:
+        return 0.0
+    inter = clip_convex(base["hull"], other_hull)
+    if len(inter) < 3:
+        inter = clip_convex(other_hull, base["hull"])
+    if len(inter) < 3:
+        return 0.0
+    # Signed distance from a point (s, t) on base's plane to other's plane.
+    c0 = dot(sub(base["origin"], other["origin"]), other["normal"])
+    cs = dot(base["u"], other["normal"])
+    ct = dot(base["v"], other["normal"])
+    if abs(cs) < 1e-15 and abs(ct) < 1e-15:
+        if abs(c0) > tol:
+            return 0.0
+        return polygon_area(inter)
+    # -tol <= c0 + s*cs + t*ct <= tol
+    inter = clip_halfplane(inter, cs, ct, tol - c0)
+    inter = clip_halfplane(inter, -cs, -ct, tol + c0)
+    return polygon_area(inter)
 
 
-def near_face(point, face, tol):
-    plane, outside = point_face_metrics(point, face)
-    if plane > tol or outside > tol:
-        return False
-    return plane * plane + outside * outside <= tol * tol + 1e-18
+def face_area(face):
+    return polygon_area(face["hull"])
+
+
+def area_epsilon(fa, fb):
+    aa = face_area(fa)
+    bb = face_area(fb)
+    small = aa if aa < bb else bb
+    if small <= 0.0:
+        return 0.0
+    return small * AREA_REL_EPS
+
+
+def overlap_area(fa, fb, tol):
+    """Projected intersection area. The larger of the two projection planes."""
+    on_a = overlap_on(fa, fb, tol)
+    on_b = overlap_on(fb, fa, tol)
+    if on_b > on_a:
+        return on_b
+    return on_a
 
 
 def angle_ok(fa, fb, dot_min):
@@ -265,19 +360,12 @@ def angle_ok(fa, fb, dot_min):
 
 
 def faces_match(fa, fb, tol, dot_min):
+    """True when the projected areas overlap, not merely when nodes fall inside."""
     if not angle_ok(fa, fb, dot_min):
         return False
     if not aabb_hit(fa["aabb"], fb["aabb"], tol):
         return False
-    samples_a = fa["pts"] + [fa["centroid"]]
-    samples_b = fb["pts"] + [fb["centroid"]]
-    for p in samples_a:
-        if strictly_inside(p, fb, tol):
-            return True
-    for p in samples_b:
-        if strictly_inside(p, fa, tol):
-            return True
-    return False
+    return overlap_area(fa, fb, tol) > area_epsilon(fa, fb)
 
 
 def shell_face_toward(shell, other):
@@ -307,106 +395,61 @@ def build_adjacency(faces):
     return adj
 
 
-def point_covered(point, normal, others, tol, dot_min):
-    for other in others:
-        if abs(dot(normal, other["normal"])) < dot_min:
-            continue
-        if near_face(point, other, tol):
-            return True
-    return False
-
-
-def covered_fraction(face, others, tol, dot_min):
-    pts = face["pts"]
-    if not pts or not others:
-        return 0.0
-    ok = 0
-    for p in pts:
-        if point_covered(p, face["normal"], others, tol, dot_min):
-            ok += 1
-    return ok / float(len(pts))
-
-
 def partners_near(face, partner_faces, tol):
     box = face["aabb"]
     return [p for p in partner_faces if aabb_hit(box, p["aabb"], tol)]
 
 
-def expand_adjacent(faces, adj, acc, partner_faces, tol, dot_min):
-    """Flood the whole mating surface, not only the first seed layers."""
-    pending = list(acc)
-    while pending:
-        i = pending.pop()
-        normal_i = faces[i]["normal"]
-        for j in adj[i]:
-            if j in acc:
-                continue
-            cand = faces[j]
-            if abs(dot(cand["normal"], normal_i)) < dot_min:
-                continue
-            near = partners_near(cand, partner_faces, tol)
-            if covered_fraction(cand, near, tol, dot_min) >= COVER_MIN:
-                acc.add(j)
-                pending.append(j)
+def overlaps_any(face, partners, tol, dot_min):
+    for other in partners:
+        if angle_ok(face, other, dot_min) and overlap_area(face, other, tol) > area_epsilon(face, other):
+            return True
+    return False
 
 
-def add_covering_faces(target_faces, target_acc, source_faces, source_acc, tol, dot_min):
-    """Add missing opposite faces so uncovered nodes become covered."""
-    targets = [target_faces[i] for i in target_acc]
+def add_overlapping(faces, acc, partner_faces, tol, dot_min):
+    """Every face with a projected overlap belongs in the set, adjacent or not."""
     added = False
-    for si in list(source_acc):
-        src = source_faces[si]
-        for p in src["pts"]:
-            if point_covered(p, src["normal"], targets, tol, dot_min):
-                continue
-            for ti, tf in enumerate(target_faces):
-                if ti in target_acc:
-                    continue
-                if not aabb_has_point(tf["aabb"], p, tol):
-                    continue
-                if abs(dot(src["normal"], tf["normal"])) < dot_min:
-                    continue
-                if near_face(p, tf, tol):
-                    target_acc.add(ti)
-                    targets.append(tf)
-                    added = True
-                    break
+    for i, face in enumerate(faces):
+        if i in acc:
+            continue
+        near = partners_near(face, partner_faces, tol)
+        if overlaps_any(face, near, tol, dot_min):
+            acc.add(i)
+            added = True
     return added
 
 
-def ensure_coverage(faces_a, adj_a, acc_a, faces_b, adj_b, acc_b, tol, dot_min):
-    # Compare with every partner face so the far end of a long interface is filled.
-    limit = len(faces_a) + len(faces_b) + 2
+def ensure_coverage(faces_a, _adj_a, acc_a, faces_b, _adj_b, acc_b, tol, dot_min):
+    limit = 4
     for _ in xrange(limit):
         before_a = len(acc_a)
         before_b = len(acc_b)
-        expand_adjacent(faces_a, adj_a, acc_a, faces_b, tol, dot_min)
-        expand_adjacent(faces_b, adj_b, acc_b, faces_a, tol, dot_min)
-        add_covering_faces(faces_a, acc_a, faces_b, acc_b, tol, dot_min)
-        add_covering_faces(faces_b, acc_b, faces_a, acc_a, tol, dot_min)
+        add_overlapping(faces_a, acc_a, faces_b, tol, dot_min)
+        add_overlapping(faces_b, acc_b, faces_a, tol, dot_min)
         if len(acc_a) == before_a and len(acc_b) == before_b:
             break
     return acc_a, acc_b
 
 
 def face_fit(face, partners, tol, dot_min):
-    """Higher coverage and smaller gap win when a face fits more than one pair."""
-    frac = covered_fraction(face, partners, tol, dot_min)
-    gaps = []
-    for point in face["pts"]:
-        best = None
-        for other in partners:
-            if abs(dot(face["normal"], other["normal"])) < dot_min:
-                continue
-            plane, outside = point_face_metrics(point, other)
-            if plane * plane + outside * outside > tol * tol + 1e-18:
-                continue
-            if best is None or plane < best:
-                best = plane
-        if best is not None:
-            gaps.append(best)
-    mean_gap = sum(gaps) / float(len(gaps)) if gaps else tol
-    return (frac, -mean_gap)
+    """Overlap area over face area. Larger projected coverage wins."""
+    area = face_area(face)
+    best = 0.0
+    best_gap = tol
+    for other in partners:
+        if not angle_ok(face, other, dot_min):
+            continue
+        ov = overlap_on(face, other, tol)
+        if ov > best:
+            best = ov
+            c0 = dot(sub(face["origin"], other["origin"]), other["normal"])
+            gap = c0 if c0 >= 0.0 else -c0
+            best_gap = gap
+    frac = best / area if area > 0.0 else 0.0
+    if frac > 1.0:
+        frac = 1.0
+    return (frac, -best_gap)
 
 
 def resolve_exclusive(pairs, node_index):
@@ -778,7 +821,7 @@ USAGE = (
     "You will be asked for a position tolerance in mm and a maximum "
     "inclination in degrees (default 15).\n"
     "A window shows the progress.\n\n"
-    "Neighbouring faces are added from 5% coverage. "
+    "A face is added as soon as its projection overlaps the partner. "
     "Each node belongs to only one contact set. Beams are ignored.\n\n"
     "Save the model first. After the run, reload it and do not save before that."
 )
@@ -1026,20 +1069,26 @@ def _self_test():
     assert faces_match(fa, tilt10, 0.002, dot15), "10 degrees must still match"
     assert not faces_match(fa, tilt20, 0.002, dot15), "20 degrees is too steep"
 
-    # A0 lies on B. A1 extends 0.02 past the edge and must be added.
+    # A1 only shares the edge y=1 with B, so the projected area is zero.
     a0 = quad([(0, 0, 0), (0, 1, 0), (0, 1, 1), (0, 0, 1)], 10, 1, (1, 2, 3, 4))
     a1 = quad([(0, 1, 0), (0, 1.02, 0), (0, 1.02, 1), (0, 1, 1)], 11, 1, (2, 5, 6, 3))
+    # A2 crosses the interior of B. No node or centroid of either face lies in the other.
+    a2 = quad([(0, 0.2, 0), (0, 0.8, 0), (0, 0.8, 1), (0, 0.2, 1)], 14, 1, (21, 22, 23, 24))
     b0 = quad([(0, 0, 0), (0, 1, 0), (0, 1, 1), (0, 0, 1)], 12, 1, (7, 8, 9, 10))
     side = quad([(0, 0, 0), (0.5, 0, 0), (0.5, 0, 1), (0, 0, 1)], 13, 2, (1, 11, 12, 4))
-    faces_a = [a0, a1, side]
+    faces_a = [a0, a1, side, a2]
     faces_b = [b0]
     adj_a = build_adjacency(faces_a)
     adj_b = build_adjacency(faces_b)
     acc_a = set([0])
     acc_b = set([0])
     ensure_coverage(faces_a, adj_a, acc_a, faces_b, adj_b, acc_b, 0.03, dot15)
-    assert 1 in acc_a, "adjacent face must be added for coverage"
+    assert 1 not in acc_a, "a shared edge is not an area overlap"
     assert 2 not in acc_a, "perpendicular face must not be added"
+    assert 3 in acc_a, "projected area overlap must add the face"
+    wide = quad([(0, 0, 0), (10, 0, 0), (10, 1, 0), (0, 1, 0)], 30, 1, (31, 32, 33, 34))
+    cross = quad([(0.2, -10, 0), (0.8, -10, 0), (0.8, 10, 0), (0.2, 10, 0)], 31, 1, (35, 36, 37, 38))
+    assert faces_match(wide, cross, 1e-6, dot15), "crossing faces overlap even if no node is inside"
 
     # A long interface seeded at one end must still cover the far faces.
     chain = []

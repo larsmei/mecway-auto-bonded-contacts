@@ -52,7 +52,7 @@ All dialogs are English.
 
 | Step | What you see |
 | --- | --- |
-| Start | Short description of the script, the two inputs, the 5% coverage rule, and the reload warning. |
+| Start | Short description of the script, the two inputs, the projected-area rule, and the reload warning. |
 | Bad mesh | `No suitable mesh.` plus the reason: no elements, only beams, or fewer than two solid/shell components. |
 | Tolerance | `Position tolerance in mm (e.g. 0.5):` |
 | Angle | `Max. face inclination in degrees [15]:` |
@@ -75,20 +75,11 @@ Two free faces, one on each component, become a seed when all of the following a
 
 - The angle between their planes is at most the value you entered. The test is `|n1 · n2| >= cos(angle)`. Opposite normals still match, because only the absolute value is used. 15° is about `|n1 · n2| >= 0.9659`.
 - Their bounding boxes overlap within the tolerance.
-- At least one sample point (a node or the centroid) of one face lies **strictly inside** the other face, and the distance to that face plane is within the tolerance. A shared edge alone is not a seed. Points that sit exactly on the boundary are rejected here so that a T-joint or a coplanar neighbour does not start a contact.
+- The projection of one face onto the other has a real intersection area, and that intersection lies within the tolerance gap. The area is the polygon clip of the two convex hulls, then clipped again to the slab `|distance to the other plane| <= tolerance`. A shared edge has zero area and is not a contact. Nodes and centroids are not the test: a face is kept as soon as the projected areas overlap, even when no node of either face falls inside the other.
 
-### 3. Coverage expansion
+### 3. Coverage
 
-Seeds alone miss the far end of a long interface. From every accepted face the script walks to neighbouring faces in the same component. Two faces are neighbours when they share at least two nodes (an edge, including mid-side nodes).
-
-A neighbour is added when:
-
-- its normal is within the angle limit of the neighbour it was reached from, so a perpendicular wall is not swallowed, and a gently curved surface can still grow face by face;
-- at least **5%** of its nodes (`COVER_MIN = 0.05`) lie within the tolerance of **any** free face of the partner component, not only of the faces already accepted.
-
-The walk continues until no further neighbour qualifies, so a chain of many elements is filled in one pass. After the walk, any partner face that covers a still-uncovered node of the accepted set is added as well, and the walk repeats until both sides stop growing.
-
-One contact is created per component pair. Separate pads between the same two components become one bonded contact if a path of qualifying faces connects them.
+After the seeds, every remaining free face of either component is tested the same way against the partner's free faces. It is added as soon as the projected overlap area is above a numerical sliver (`AREA_REL_EPS = 1e-8` of the smaller face). The face does not have to share an edge with a face already in the set. Both sides are scanned until nothing new appears, so the far end of a long interface is included.
 
 ### 4. One node, one contact
 
@@ -96,8 +87,8 @@ A node must not appear in more than one contact set. The same component can mate
 
 Each accepted face is scored against its partner:
 
-- primary: fraction of nodes that lie on the partner within the tolerance;
-- secondary: smaller mean gap wins ties.
+- primary: projected overlap area divided by the face area;
+- secondary: smaller gap between the two planes wins ties.
 
 Faces are assigned in score order. If any node of a face is already owned by another contact, the whole face is dropped from this contact. It cannot be split. If either side of a contact becomes empty, that contact is discarded and reported in the summary.
 
@@ -156,9 +147,9 @@ If WinForms cannot be loaded, the search still runs; you only lose the live bar.
 - One bonded contact per component pair, not one contact per disconnected pad.
 - Shell edges and beam ends are never contacts.
 - Plane elements that Mecway reports as `tri3` or `quad4` are treated as shells.
-- The angle test is local, from face to neighbouring face. A long curve is allowed as long as each step is inside the limit. A single 20° kink stops the flood there.
-- Very large tolerances pull in every face of a component that is still within that distance of the partner.
-- The 5% rule means one node of a four-node face is enough (25% ≥ 5%). The angle test is what stops perpendicular faces.
+- The angle is measured between each candidate face and the partner face. A face past the limit is ignored even when a neighbour is still inside it.
+- Very large tolerances pull in every face whose projection still meets the partner inside that gap.
+- A shared edge or a corner touch has no area and is ignored. Any positive projected overlap is enough.
 - Detection is geometric. It does not read existing Mecway contacts, named selections, or material ids.
 - The script is IronPython 2.7 inside Mecway and CPython 3 outside Mecway. Outside Mecway, `python AutoBondedContacts.py` runs the geometry self-test and does not need a model.
 
@@ -176,7 +167,7 @@ Expected output:
 self-test ok
 ```
 
-The test checks parallel faces, a 10° pass and a 20° reject, edge-only rejection, coverage of a face that sticks out by a small amount, a 30-face chain seeded at one end, and exclusive node assignment by fit score.
+The test checks parallel faces, a 10° pass and a 20° reject, edge-only rejection, a crossing pair whose nodes lie outside each other, a 30-face chain, and exclusive node assignment by projected-area score.
 
 ## Constants
 
@@ -186,8 +177,9 @@ Edit these near the top of `AutoBondedContacts.py` if the defaults are wrong for
 | --- | --- | --- |
 | `CONTACT_TYPE` | `bondedce` | Mecway contact type written into `<contact2>`. |
 | `DEFAULT_ANGLE_DEG` | `15` | Shown in the angle prompt. Empty input keeps this value. |
-| `COVER_MIN` | `0.05` | Fraction of nodes that must lie on the partner before a neighbour is added. |
+| `AREA_REL_EPS` | `1e-8` | Fraction of the smaller face area below which a projected overlap is treated as numerical noise. |
 
 ## Version
 
-1.0.0 — first release. Solids and shells, angle limit, progress window, full-interface coverage, exclusive nodes, `.liml` bonded contacts.
+1.0.1 — coverage is the projected polygon intersection, not a node count. A face is added as soon as that area is real.
+1.0.0 — first release. Solids and shells, angle limit, progress window, exclusive nodes, `.liml` bonded contacts.
