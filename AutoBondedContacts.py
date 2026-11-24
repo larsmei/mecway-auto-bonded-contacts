@@ -796,6 +796,75 @@ def _better(store, idx, frac, gap):
         store[idx] = cand
 
 
+def faces_of_nodes(faces):
+    """Every free face that uses a node. A node is never reduced to its first face."""
+    by_node = {}
+    coords = {}
+    for index, face in enumerate(faces):
+        nodes = face["nodes"]
+        pts = face["pts"]
+        for i in xrange(len(nodes)):
+            nid = nodes[i]
+            coords[nid] = pts[i]
+            bucket = by_node.get(nid)
+            if bucket is None:
+                by_node[nid] = [index]
+            elif index not in bucket:
+                bucket.append(index)
+    return by_node, coords
+
+
+def qualifying_nodes(coords, opposite, bins, tol):
+    """Nodes whose normal distance to any opposite face is within tolerance."""
+    found = {}
+    for nid, point in iteritems(coords):
+        box = (point[0], point[1], point[2], point[0], point[1], point[2])
+        best = None
+        for ib in bins.query(box):
+            gap = normal_gap(point, opposite[ib])
+            if gap <= tol and (best is None or gap < best):
+                best = gap
+        if best is not None:
+            found[nid] = best
+    return found
+
+
+def consider_pair(ia, ib, fa, fb, tol, dot_min, hits_a, hits_b, score_a, score_b, partner_a, partner_b):
+    if not angle_ok(fa, fb, dot_min):
+        return
+    if not aabb_hit(fa["aabb"], fb["aabb"], tol):
+        return
+    area = projected_overlap(fa, fb, tol)
+    if area <= 0.0:
+        return
+    hits_a.add(ia)
+    hits_b.add(ib)
+    gap_a = nodes_within_normal(fa, fb, tol)
+    gap_b = nodes_within_normal(fb, fa, tol)
+    if gap_a is None:
+        gap = gap_b if gap_b is not None else tol
+    elif gap_b is None or gap_a < gap_b:
+        gap = gap_a
+    else:
+        gap = gap_b
+    area_a = fa["area"]
+    area_b = fb["area"]
+    frac_a = area / area_a if area_a > 0.0 else 0.0
+    frac_b = area / area_b if area_b > 0.0 else 0.0
+    if frac_a > 1.0:
+        frac_a = 1.0
+    if frac_b > 1.0:
+        frac_b = 1.0
+    prev_a = score_a.get(ia)
+    prev_b = score_b.get(ib)
+    _better(score_a, ia, frac_a, gap)
+    _better(score_b, ib, frac_b, gap)
+    if score_a.get(ia) != prev_a:
+        partner_a[ia] = ib
+    if score_b.get(ib) != prev_b:
+        partner_b[ib] = ia
+
+
 def seed_pairs(list_a, list_b, tol, dot_min, prog, frac, text):
     hits_a = set()
     hits_b = set()
@@ -803,53 +872,45 @@ def seed_pairs(list_a, list_b, tol, dot_min, prog, frac, text):
     score_b = {}
     partner_a = {}
     partner_b = {}
-    bins = Broadphase(list_b, tol)
-    n_a = len(list_a)
-    for ia, fa in enumerate(list_a):
-        if ia % 40 == 0:
-            prog.set(frac, "%s  %d/%d faces" % (text, ia, n_a))
-        na = fa["normal"]
-        for ib in bins.query(fa["aabb"]):
-            fb = list_b[ib]
-            if not aabb_hit(fa["aabb"], fb["aabb"], tol):
-                continue
-            nb = fb["normal"]
-            nd = na[0] * nb[0] + na[1] * nb[1] + na[2] * nb[2]
-            if nd < 0.0:
-                nd = -nd
-            if nd < dot_min:
-                continue
-            gap_a = nodes_within_normal(fa, fb, tol)
-            gap_b = nodes_within_normal(fb, fa, tol)
-            if gap_a is None and gap_b is None:
-                continue
-            area = projected_overlap(fa, fb, tol)
-            if area <= 0.0:
-                continue
-            hits_a.add(ia)
-            hits_b.add(ib)
-            if gap_a is None:
-                gap = gap_b
-            elif gap_b is None or gap_a < gap_b:
-                gap = gap_a
-            else:
-                gap = gap_b
-            area_a = fa["area"]
-            area_b = fb["area"]
-            frac_a = area / area_a if area_a > 0.0 else 0.0
-            frac_b = area / area_b if area_b > 0.0 else 0.0
-            if frac_a > 1.0:
-                frac_a = 1.0
-            if frac_b > 1.0:
-                frac_b = 1.0
-            prev_a = score_a.get(ia)
-            prev_b = score_b.get(ib)
-            _better(score_a, ia, frac_a, gap)
-            _better(score_b, ib, frac_b, gap)
-            if score_a.get(ia) != prev_a:
-                partner_a[ia] = ib
-            if score_b.get(ib) != prev_b:
-                partner_b[ib] = ia
+    by_a, coords_a = faces_of_nodes(list_a)
+    by_b, coords_b = faces_of_nodes(list_b)
+    bins_b = Broadphase(list_b, tol)
+    bins_a = Broadphase(list_a, tol)
+    qual_a = qualifying_nodes(coords_a, list_b, bins_b, tol)
+    qual_b = qualifying_nodes(coords_b, list_a, bins_a, tol)
+    seen = {}
+    n_nodes = len(qual_a) + len(qual_b)
+    done = 0
+
+    def accept_faces(face_indexes, faces, bins, other_faces, source_is_a):
+        for ia in face_indexes:
+            face = faces[ia]
+            for ib in bins.query(face["aabb"]):
+                key = (ia, ib) if source_is_a else (ib, ia)
+                if key in seen:
+                    continue
+                seen[key] = True
+                if source_is_a:
+                    consider_pair(
+                        ia, ib, face, other_faces[ib], tol, dot_min,
+                        hits_a, hits_b, score_a, score_b, partner_a, partner_b,
+                    )
+                else:
+                    consider_pair(
+                        ib, ia, other_faces[ib], face, tol, dot_min,
+                        hits_a, hits_b, score_a, score_b, partner_a, partner_b,
+                    )
+
+    for nid in qual_a:
+        done += 1
+        if done % 40 == 0:
+            prog.set(frac, "%s  %d/%d nodes" % (text, done, n_nodes))
+        accept_faces(by_a[nid], list_a, bins_b, list_b, True)
+    for nid in qual_b:
+        done += 1
+        if done % 40 == 0:
+            prog.set(frac, "%s  %d/%d nodes" % (text, done, n_nodes))
+        accept_faces(by_b[nid], list_b, bins_a, list_a, False)
     return hits_a, hits_b, score_a, score_b, partner_a, partner_b
 
 
@@ -1036,8 +1097,8 @@ USAGE = (
     "inclination in degrees (default 15).\n"
     "A window shows the progress.\n\n"
     "A node counts when its normal distance is within the tolerance. "
-    "The free face of that node is then paired with every opposite face "
-    "that has a projected overlap.\n"
+    "Every free face of that node is checked, not only the first. "
+    "A face is kept when it has a projected overlap with an opposite face.\n"
     "Each node belongs to only one contact set. Beams are ignored.\n\n"
     "Save the model first. After the run, reload it and do not save before that."
 )
@@ -1335,6 +1396,21 @@ def _self_test():
         0.001, dot15,
     )
     assert len(chain_acc) == 30, "far end of the last faces must be covered"
+
+    class _Prog(object):
+        def set(self, *_args, **_kwargs):
+            return None
+
+    # One shared node, two free faces. Both must be tested, not only the first.
+    left = quad([(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)], 300, 1, (1, 2, 3, 4))
+    right = quad([(1, 0, 0), (2, 0, 0), (2, 1, 0), (1, 1, 0)], 301, 1, (2, 5, 6, 3))
+    wall = quad([(1, 0, 0), (1, 1, 0), (1, 1, 1), (1, 0, 1)], 302, 2, (2, 3, 7, 8))
+    cover = quad([(0, 0, 0), (2, 0, 0), (2, 1, 0), (0, 1, 0)], 303, 1, (9, 10, 11, 12))
+    ha, hb, _sa, _sb, _pa, _pb = seed_pairs(
+        [left, right, wall], [cover], 1e-6, dot15, _Prog(), 0.5, "nodes")
+    assert 0 in ha and 1 in ha, "every free face of the node must be checked"
+    assert 2 not in ha, "a face without projected overlap is not kept"
+    assert 0 in hb
 
     def scored(keys, score):
         return dict((key, score) for key in keys)

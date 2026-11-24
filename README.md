@@ -75,7 +75,7 @@ Two free faces, one on each component, become a seed when all of the following a
 
 - The angle between their planes is at most the value you entered. The test is `|n1 · n2| >= cos(angle)`. Opposite normals still match, because only the absolute value is used. 15° is about `|n1 · n2| >= 0.9659`.
 - Their bounding boxes overlap within the tolerance.
-- One of its nodes is within the tolerance of the opposite face, measured along that face normal. The node does not have to land inside the face outline.
+- One of its nodes is within the tolerance of an opposite face, measured along that face normal. Every free face that uses this node is then checked, not only the first. The node does not have to land inside the face outline.
 - The two faces have a projected area overlap. Every opposite face that overlaps the free face of such a node is kept. A shared edge has no area and is not enough.
 
 ### 3. Coverage
@@ -182,6 +182,7 @@ Edit these near the top of `AutoBondedContacts.py` if the defaults are wrong for
 
 ## Version
 
+1.0.5 — every free face of a qualifying node is checked, not only the first.
 1.0.4 — a node counts by normal distance. Opposite faces are those with a projected overlap.
 1.0.3 — contact finding uses node projection. A face is added when a node lands on the partner within the tolerance, including just past the edge.
 1.0.2 — broadphase grid. Each face is tested only against nearby faces, and the overlap area is computed once.
