@@ -75,11 +75,12 @@ Two free faces, one on each component, become a seed when all of the following a
 
 - The angle between their planes is at most the value you entered. The test is `|n1 · n2| >= cos(angle)`. Opposite normals still match, because only the absolute value is used. 15° is about `|n1 · n2| >= 0.9659`.
 - Their bounding boxes overlap within the tolerance.
-- A node of one face projects onto the other. The node is dropped onto that face's plane. It counts when the gap is within the tolerance and the projected point lies on the face, or within the same tolerance past the edge. The boundary counts. A shared edge alone is not required: the face that owns the projecting node is added, and so is the face that receives it. This is what grows a contact across a long interface, including the far end.
+- One of its nodes is within the tolerance of the opposite face, measured along that face normal. The node does not have to land inside the face outline.
+- The two faces have a projected area overlap. Every opposite face that overlaps the free face of such a node is kept. A shared edge has no area and is not enough.
 
 ### 3. Coverage
 
-After the seeds, every remaining free face is tested the same way. A face is added as soon as one of its nodes projects onto a partner face, or a partner node projects onto it, within the tolerance. No separate area clip is used.
+After the seeds, every remaining free face is tested the same way: a node within the normal tolerance, then a projected overlap with a partner face.
 
 ### 4. One node, one contact
 
@@ -181,6 +182,7 @@ Edit these near the top of `AutoBondedContacts.py` if the defaults are wrong for
 
 ## Version
 
+1.0.4 — a node counts by normal distance. Opposite faces are those with a projected overlap.
 1.0.3 — contact finding uses node projection. A face is added when a node lands on the partner within the tolerance, including just past the edge.
 1.0.2 — broadphase grid. Each face is tested only against nearby faces, and the overlap area is computed once.
 1.0.1 — coverage is the projected polygon intersection, not a node count. A face is added as soon as that area is real.

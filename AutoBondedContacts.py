@@ -423,75 +423,45 @@ def angle_ok(fa, fb, dot_min):
     return d >= dot_min
 
 
-def hull_outside(p2, hull):
-    """In-plane distance outside a convex hull. 0 when inside or on the boundary."""
-    nearest = 1e300
-    outside = False
-    n = len(hull)
-    for i in xrange(n):
-        a = hull[i]
-        b = hull[(i + 1) % n]
-        cr = (b[0] - a[0]) * (p2[1] - a[1]) - (b[1] - a[1]) * (p2[0] - a[0])
-        if cr < -1e-12:
-            outside = True
-            de = dist_point_seg_2d(p2, a, b)
-            if de < nearest:
-                nearest = de
-    if not outside:
-        return 0.0
-    return nearest
-
-
-def node_projects(point, face, tol):
-    """Project one node onto a face. Hit when it lands on the face within tolerance."""
+def normal_gap(point, face):
+    """Distance from a node to the face plane, along the face normal."""
     normal = face["normal"]
     ox, oy, oz = face["origin"]
-    dx = point[0] - ox
-    dy = point[1] - oy
-    dz = point[2] - oz
-    plane = dx * normal[0] + dy * normal[1] + dz * normal[2]
-    if plane > tol or plane < -tol:
-        return None
-    u = face["u"]
-    v = face["v"]
-    p2 = (
-        dx * u[0] + dy * u[1] + dz * u[2],
-        dx * v[0] + dy * v[1] + dz * v[2],
-    )
-    if hull_outside(p2, face["hull"]) > tol:
-        return None
-    if plane < 0.0:
-        return -plane
-    return plane
+    gap = (point[0] - ox) * normal[0] + (point[1] - oy) * normal[1] + (point[2] - oz) * normal[2]
+    if gap < 0.0:
+        return -gap
+    return gap
 
 
-def projection_score(source, target, tol):
-    """Fraction of source nodes that project onto target, and their mean gap."""
-    pts = source["pts"]
-    if not pts:
-        return None
-    ok = 0
-    gap_sum = 0.0
-    for point in pts:
-        gap = node_projects(point, target, tol)
-        if gap is None:
+def nodes_within_normal(source, target, tol):
+    """Smallest normal gap of a source node to the target plane, or None."""
+    best = None
+    for point in source["pts"]:
+        gap = normal_gap(point, target)
+        if gap > tol:
             continue
-        ok += 1
-        gap_sum += gap
-    if ok == 0:
-        return None
-    return (ok / float(len(pts)), gap_sum / float(ok))
+        if best is None or gap < best:
+            best = gap
+    return best
+
+
+def projected_overlap(fa, fb, tol):
+    eps = area_epsilon(fa, fb)
+    area = overlap_area(fa, fb, tol)
+    if area <= eps:
+        return 0.0
+    return area
 
 
 def faces_match(fa, fb, tol, dot_min):
-    """True when a node of one face projects onto the other."""
+    """Node within the normal tolerance, then a real projected overlap."""
     if not angle_ok(fa, fb, dot_min):
         return False
     if not aabb_hit(fa["aabb"], fb["aabb"], tol):
         return False
-    if projection_score(fa, fb, tol) is not None:
-        return True
-    return projection_score(fb, fa, tol) is not None
+    if nodes_within_normal(fa, fb, tol) is None and nodes_within_normal(fb, fa, tol) is None:
+        return False
+    return projected_overlap(fa, fb, tol) > 0.0
 
 
 def shell_face_toward(shell, other):
@@ -528,11 +498,7 @@ def partners_near(face, partner_faces, tol):
 
 def overlaps_any(face, partners, tol, dot_min):
     for other in partners:
-        if not angle_ok(face, other, dot_min):
-            continue
-        if projection_score(face, other, tol) is not None:
-            return True
-        if projection_score(other, face, tol) is not None:
+        if faces_match(face, other, tol, dot_min):
             return True
     return False
 
@@ -853,22 +819,29 @@ def seed_pairs(list_a, list_b, tol, dot_min, prog, frac, text):
                 nd = -nd
             if nd < dot_min:
                 continue
-            sa = projection_score(fa, fb, tol)
-            sb = projection_score(fb, fa, tol)
-            if sa is None and sb is None:
+            gap_a = nodes_within_normal(fa, fb, tol)
+            gap_b = nodes_within_normal(fb, fa, tol)
+            if gap_a is None and gap_b is None:
+                continue
+            area = projected_overlap(fa, fb, tol)
+            if area <= 0.0:
                 continue
             hits_a.add(ia)
             hits_b.add(ib)
-            if sa is not None:
-                frac_a, gap = sa
+            if gap_a is None:
+                gap = gap_b
+            elif gap_b is None or gap_a < gap_b:
+                gap = gap_a
             else:
-                frac_a, gap = sb
-            if sb is not None:
-                frac_b, gap_b = sb
-                if sa is None or gap_b < gap:
-                    gap = gap_b
-            else:
-                frac_b = frac_a
+                gap = gap_b
+            area_a = fa["area"]
+            area_b = fb["area"]
+            frac_a = area / area_a if area_a > 0.0 else 0.0
+            frac_b = area / area_b if area_b > 0.0 else 0.0
+            if frac_a > 1.0:
+                frac_a = 1.0
+            if frac_b > 1.0:
+                frac_b = 1.0
             prev_a = score_a.get(ia)
             prev_b = score_b.get(ib)
             _better(score_a, ia, frac_a, gap)
@@ -1062,8 +1035,9 @@ USAGE = (
     "You will be asked for a position tolerance in mm and a maximum "
     "inclination in degrees (default 15).\n"
     "A window shows the progress.\n\n"
-    "A face is added when one of its nodes projects onto the partner, "
-    "including nodes that fall within the tolerance past the edge. "
+    "A node counts when its normal distance is within the tolerance. "
+    "The free face of that node is then paired with every opposite face "
+    "that has a projected overlap.\n"
     "Each node belongs to only one contact set. Beams are ignored.\n\n"
     "Save the model first. After the run, reload it and do not save before that."
 )
@@ -1305,7 +1279,7 @@ def _self_test():
     assert faces_match(fa, tilt10, 0.002, dot15), "10 degrees must still match"
     assert not faces_match(fa, tilt20, 0.002, dot15), "20 degrees is too steep"
 
-    # A1 sticks out by 0.02. With tolerance 0.03 its nodes still project onto B.
+    # A1 only shares an edge. Nodes are on the plane, but there is no area overlap.
     a0 = quad([(0, 0, 0), (0, 1, 0), (0, 1, 1), (0, 0, 1)], 10, 1, (1, 2, 3, 4))
     a1 = quad([(0, 1, 0), (0, 1.02, 0), (0, 1.02, 1), (0, 1, 1)], 11, 1, (2, 5, 6, 3))
     a2 = quad([(0, 0.2, 0), (0, 0.8, 0), (0, 0.8, 1), (0, 0.2, 1)], 14, 1, (21, 22, 23, 24))
@@ -1318,14 +1292,14 @@ def _self_test():
     acc_a = set([0])
     acc_b = set([0])
     ensure_coverage(faces_a, adj_a, acc_a, faces_b, adj_b, acc_b, 0.03, dot15)
-    assert 1 in acc_a, "nodes within tolerance must add the next face"
+    assert 1 not in acc_a, "no projected overlap, so the face is not added"
     assert 2 not in acc_a, "perpendicular face must not be added"
-    assert 3 in acc_a, "nodes that project inside must add the face"
+    assert 3 in acc_a, "projected overlap adds the opposite face"
     wide = quad([(0, 0, 0), (10, 0, 0), (10, 1, 0), (0, 1, 0)], 30, 1, (31, 32, 33, 34))
     cross = quad([(0.2, -10, 0), (0.8, -10, 0), (0.8, 10, 0), (0.2, 10, 0)], 31, 1, (35, 36, 37, 38))
-    assert not faces_match(wide, cross, 1e-6, dot15), "no node projects onto the other face"
-    landed = quad([(-0.5, -1, 0), (1, -1, 0), (1, 2, 0), (-0.5, 2, 0)], 33, 1, (43, 44, 45, 46))
-    assert faces_match(wide, landed, 1e-6, dot15), "a node that lands on the face is a contact"
+    assert faces_match(wide, cross, 1e-6, dot15), "projected overlap counts when the normal gap is small"
+    lifted = quad([(0, 0, 1), (10, 0, 1), (10, 1, 1), (0, 1, 1)], 34, 1, (47, 48, 49, 50))
+    assert not faces_match(wide, lifted, 1e-4, dot15), "normal distance above the tolerance rejects the face"
     small = []
     for i in xrange(6):
         small.append(quad(
