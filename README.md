@@ -75,7 +75,7 @@ Every free face is compared with every opposite face whose bounding box lies wit
 
 A pair is a contact when the projected overlap is greater than zero. Distance and angle are the only exclusions:
 
-- The angle between the planes is at most the value you entered. The test is `|n1 · n2| >= cos(angle)`. Opposite normals still match. 15° is about `|n1 · n2| >= 0.9659`.
+- The normals must point in opposite directions, and the angle between the planes is at most the value you entered. The test is `n1 · n2 <= -cos(angle)`. Faces that point the same way are ignored. 15° is about `n1 · n2 <= -0.9659`.
 - The overlap lies within the tolerance. The gap is measured on the overlap itself, not at the first node of the face. A small overlap is enough. If the whole overlap is farther than the tolerance, there is no contact.
 - Nodes are not projected and do not decide the pair. A shared edge has no area and is not a contact.
 
@@ -149,7 +149,7 @@ If WinForms cannot be loaded, the search still runs; you only lose the live bar.
 - One bonded contact per component pair, not one contact per disconnected pad.
 - Shell edges and beam ends are never contacts.
 - Plane elements that Mecway reports as `tri3` or `quad4` are treated as shells.
-- The angle is measured between each candidate face and the partner face. A face past the limit is ignored even when a neighbour is still inside it.
+- The angle is measured between each candidate face and the partner face. The normals must point in opposite directions. A face past the limit, or pointing the same way, is ignored.
 - Very large tolerances pull in every face whose projection still meets the partner inside that gap.
 - A node within the tolerance past an edge still pulls that face into the contact. A node farther outside does not.
 - A pure crossing, where the areas overlap but no node projects onto the other face, is not a contact.
@@ -183,6 +183,7 @@ Edit these near the top of `AutoBondedContacts.py` if the defaults are wrong for
 
 ## Version
 
+1.0.11 — only faces with opposite normals are contacts. Faces pointing the same way are ignored.
 1.0.10 — a small overlap counts. The gap is measured on the overlap, not at the first node.
 1.0.9 — faces only. Overlap greater than zero is a contact. Distance and angle are the only exclusions. No node projection.
 1.0.8 — contact search rewritten. Every face whose box is in range is tested. A node is no longer required to fall inside the partner outline.

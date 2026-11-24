@@ -390,14 +390,13 @@ def overlap_area(fa, fb, tol):
 
 
 def angle_ok(fa, fb, dot_min):
+    """True only when the normals face opposite ways, within the angle limit."""
     d = (
         fa["normal"][0] * fb["normal"][0]
         + fa["normal"][1] * fb["normal"][1]
         + fa["normal"][2] * fb["normal"][2]
     )
-    if d < 0.0:
-        d = -d
-    return d >= dot_min
+    return d <= -dot_min
 
 
 def face_gap(fa, fb):
@@ -936,7 +935,8 @@ USAGE = (
     "inclination in degrees (default 15).\n"
     "A window shows the progress.\n\n"
     "A face is a contact face when the projected overlap is greater than zero, "
-    "including a small overlap. Distance and angle are the only exclusions. "
+    "including a small overlap. The normals must point in opposite directions "
+    "and stay within the angle limit. Faces pointing the same way are ignored. "
     "The distance is taken on the overlap, not at the first node.\n"
     "Each node belongs to only one contact set. Beams are ignored.\n\n"
     "Save the model first. After the run, reload it and do not save before that."
@@ -1145,6 +1145,12 @@ def _self_test():
     def quad(pts, eid, fid, nodes, kind="solid"):
         return prepare_face(eid, fid, pts, kind, nodes)
 
+    def oppose(face):
+        return quad(
+            list(reversed(face["pts"])),
+            face["eid"], face["fid"], tuple(reversed(face["nodes"])), face["kind"],
+        )
+
     dot15 = dot_min_for_angle(15.0)
     s = 0.001
     a_px = [(s, 0, 0), (s, s, 0), (s, s, s), (s, 0, s)]
@@ -1156,6 +1162,7 @@ def _self_test():
     fo = quad(a_outer, 1, 2, (1, 4, 8, 5))
     ft = quad(a_top, 1, 1, (5, 6, 7, 8))
     assert faces_match(fa, fb, 1e-6, dot15)
+    assert not faces_match(fa, oppose(fb), 1e-6, dot15), "faces pointing the same way are ignored"
     assert not faces_match(fo, fb, 1e-4, dot15)
     assert not faces_match(ft, fb, 1e-4, dot15)
 
@@ -1181,7 +1188,7 @@ def _self_test():
 
     # Corners are farther than the tolerance. The overlapping middle still counts.
     long_a = quad([(0, 0, 0), (4, 0, 0), (4, 1, 0), (0, 1, 0)], 50, 1, (61, 62, 63, 64))
-    long_b = quad(rotate_y([(0, 0, 0), (4, 0, 0), (4, 1, 0), (0, 1, 0)], 10.0), 51, 1, (65, 66, 67, 68))
+    long_b = oppose(quad(rotate_y([(0, 0, 0), (4, 0, 0), (4, 1, 0), (0, 1, 0)], 10.0), 51, 1, (65, 66, 67, 68)))
     assert faces_match(long_a, long_b, 0.05, dot15), "overlap above zero counts without using the nodes"
 
     # A small overlap at the far end still counts. The first node is outside the tolerance.
@@ -1193,17 +1200,17 @@ def _self_test():
         z = p[2]
         return (ca * x + sa * z + 90.0, p[1], -sa * x + ca * z)
     plate = quad([(0, 0, 0), (100, 0, 0), (100, 10, 0), (0, 10, 0)], 70, 1, (71, 72, 73, 74))
-    sliver = quad(
+    sliver = oppose(quad(
         [tilt_about_far(p) for p in ((89, 2, 0.01), (91, 2, 0.01), (91, 4, 0.01), (89, 4, 0.01))],
         71, 1, (75, 76, 77, 78),
-    )
+    ))
     assert faces_match(plate, sliver, 0.05, dot15), "a small overlap within the tolerance must count"
 
     # A1 only shares an edge. Nodes are on the plane, but there is no area overlap.
     a0 = quad([(0, 0, 0), (0, 1, 0), (0, 1, 1), (0, 0, 1)], 10, 1, (1, 2, 3, 4))
     a1 = quad([(0, 1, 0), (0, 1.02, 0), (0, 1.02, 1), (0, 1, 1)], 11, 1, (2, 5, 6, 3))
     a2 = quad([(0, 0.2, 0), (0, 0.8, 0), (0, 0.8, 1), (0, 0.2, 1)], 14, 1, (21, 22, 23, 24))
-    b0 = quad([(0, 0, 0), (0, 1, 0), (0, 1, 1), (0, 0, 1)], 12, 1, (7, 8, 9, 10))
+    b0 = oppose(quad([(0, 0, 0), (0, 1, 0), (0, 1, 1), (0, 0, 1)], 12, 1, (7, 8, 9, 10)))
     side = quad([(0, 0, 0), (0.5, 0, 0), (0.5, 0, 1), (0, 0, 1)], 13, 2, (1, 11, 12, 4))
     class _Prog(object):
         def set(self, *_args, **_kwargs):
@@ -1218,7 +1225,7 @@ def _self_test():
     assert 0 in hb
 
     wide = quad([(0, 0, 0), (10, 0, 0), (10, 1, 0), (0, 1, 0)], 30, 1, (31, 32, 33, 34))
-    cross = quad([(0.2, -10, 0), (0.8, -10, 0), (0.8, 10, 0), (0.2, 10, 0)], 31, 1, (35, 36, 37, 38))
+    cross = oppose(quad([(0.2, -10, 0), (0.8, -10, 0), (0.8, 10, 0), (0.2, 10, 0)], 31, 1, (35, 36, 37, 38)))
     lifted = quad([(0, 0, 1), (10, 0, 1), (10, 1, 1), (0, 1, 1)], 34, 1, (47, 48, 49, 50))
     assert faces_match(wide, cross, 1e-6, dot15), "projected overlap counts when the normal gap is small"
     assert not faces_match(wide, lifted, 1e-4, dot15), "normal distance above the tolerance rejects the face"
@@ -1232,10 +1239,10 @@ def _self_test():
             [(i, 0, 0), (i + 1, 0, 0), (i + 1, 1, 0), (i, 1, 0)],
             100 + i, 1, (i, i + 1, 1000 + i + 1, 1000 + i),
         ))
-    plate = quad(
+    plate = oppose(quad(
         [(0, 0, 0), (30, 0, 0), (30, 1, 0), (0, 1, 0)],
         200, 1, (5000, 5001, 5002, 5003),
-    )
+    ))
     ha, hb, _sa, _sb, _pa, _pb = find_interface(
         chain, [plate], 0.001, dot15, _Prog(), 0.5, "chain")
     assert len(ha) == 30 and 0 in hb, "every face of a continuous interface is kept"
@@ -1243,7 +1250,7 @@ def _self_test():
     left = quad([(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)], 300, 1, (1, 2, 3, 4))
     right = quad([(1, 0, 0), (2, 0, 0), (2, 1, 0), (1, 1, 0)], 301, 1, (2, 5, 6, 3))
     wall = quad([(1, 0, 0), (1, 1, 0), (1, 1, 1), (1, 0, 1)], 302, 2, (2, 3, 7, 8))
-    cover = quad([(0, 0, 0), (2, 0, 0), (2, 1, 0), (0, 1, 0)], 303, 1, (9, 10, 11, 12))
+    cover = oppose(quad([(0, 0, 0), (2, 0, 0), (2, 1, 0), (0, 1, 0)], 303, 1, (9, 10, 11, 12)))
     ha, hb, _sa, _sb, _pa, _pb = find_interface(
         [left, right, wall], [cover], 1e-6, dot15, _Prog(), 0.5, "nodes")
     assert 0 in ha and 1 in ha, "every free face of the node is tested"
@@ -1261,7 +1268,7 @@ def _self_test():
         )
 
     inner = [arc_face(i, 1.0, 500 + i, 1000) for i in xrange(6)]
-    outer = [arc_face(i, 1.002, 800 + i, 2000) for i in xrange(6)]
+    outer = [oppose(arc_face(i, 1.002, 800 + i, 2000)) for i in xrange(6)]
     ha, hb, _sa, _sb, _pa, _pb = find_interface(
         inner, outer, 0.01, dot15, _Prog(), 0.5, "bend")
     assert len(ha) == 6 and len(hb) == 6, "a bend is found in full, not as scattered faces"
