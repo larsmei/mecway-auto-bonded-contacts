@@ -865,6 +865,93 @@ def consider_pair(ia, ib, fa, fb, tol, dot_min, hits_a, hits_b, score_a, score_b
         partner_b[ib] = ia
 
 
+def hull_outside(p2, hull):
+    nearest = 1e300
+    outside = False
+    n = len(hull)
+    for i in xrange(n):
+        a = hull[i]
+        b = hull[(i + 1) % n]
+        cr = (b[0] - a[0]) * (p2[1] - a[1]) - (b[1] - a[1]) * (p2[0] - a[0])
+        if cr < -1e-12:
+            outside = True
+            de = dist_point_seg_2d(p2, a, b)
+            if de < nearest:
+                nearest = de
+    if not outside:
+        return 0.0
+    return nearest
+
+
+def projects_on(point, face, tol):
+    if normal_gap(point, face) > tol:
+        return False
+    ox, oy, oz = face["origin"]
+    dx = point[0] - ox
+    dy = point[1] - oy
+    dz = point[2] - oz
+    u = face["u"]
+    v = face["v"]
+    p2 = (
+        dx * u[0] + dy * u[1] + dz * u[2],
+        dx * v[0] + dy * v[1] + dz * v[2],
+    )
+    return hull_outside(p2, face["hull"]) <= tol
+
+
+def grow_side(faces, adj, acc, score, partner_of, partner_faces, partner_acc, tol, dot_min):
+    """Fill holes so a contact patch stays one continuous surface."""
+    if not acc or not partner_acc:
+        return
+    pending = list(acc)
+    guard = 0
+    limit = len(faces) + 1
+    while pending and guard < limit:
+        guard += 1
+        i = pending.pop()
+        for j in adj[i]:
+            if j in acc:
+                continue
+            face = faces[j]
+            if not angle_ok(face, faces[i], dot_min):
+                continue
+            samples = [face["centroid"]]
+            samples.extend(face["pts"])
+            chosen = None
+            gap = tol
+            for ib in partner_acc:
+                other = partner_faces[ib]
+                if not angle_ok(face, other, dot_min):
+                    continue
+                for point in samples:
+                    if projects_on(point, other, tol):
+                        chosen = ib
+                        gap = normal_gap(point, other)
+                        break
+                if chosen is not None:
+                    break
+            if chosen is None:
+                continue
+            acc.add(j)
+            pending.append(j)
+            _better(score, j, 0.5, gap)
+            if j not in partner_of:
+                partner_of[j] = chosen
+
+
+def seal_pair(faces_a, acc_a, score_a, partner_a, faces_b, acc_b, score_b, partner_b, tol, dot_min):
+    adj_a = build_adjacency(faces_a)
+    adj_b = build_adjacency(faces_b)
+    limit = 8
+    for _ in xrange(limit):
+        before_a = len(acc_a)
+        before_b = len(acc_b)
+        grow_side(faces_a, adj_a, acc_a, score_a, partner_a, faces_b, acc_b, tol, dot_min)
+        grow_side(faces_b, adj_b, acc_b, score_b, partner_b, faces_a, acc_a, tol, dot_min)
+        if len(acc_a) == before_a and len(acc_b) == before_b:
+            break
+
+
 def seed_pairs(list_a, list_b, tol, dot_min, prog, frac, text):
     hits_a = set()
     hits_b = set()
@@ -1098,7 +1185,8 @@ USAGE = (
     "A window shows the progress.\n\n"
     "A node counts when its normal distance is within the tolerance. "
     "Every free face of that node is checked, not only the first. "
-    "A face is kept when it has a projected overlap with an opposite face.\n"
+    "A face is kept when it has a projected overlap with an opposite face. "
+    "Gaps in that patch are closed so the marked surface stays continuous.\n"
     "Each node belongs to only one contact set. Beams are ignored.\n\n"
     "Save the model first. After the run, reload it and do not save before that."
 )
@@ -1248,6 +1336,12 @@ def _run(tol_mm, tol_m, angle, dot_min, prog, comps):
             fa["faces"], fb["faces"], tol_m, dot_min, prog, frac, text)
         if not seeds_a or not seeds_b:
             continue
+        prog.set(frac + 0.01, "Closing gaps: %s / %s" % (na, nb), force=True)
+        seal_pair(
+            fa["faces"], seeds_a, score_a, partner_a,
+            fb["faces"], seeds_b, score_b, partner_b,
+            tol_m, dot_min,
+        )
         keys_a, score_key_a = keys_for(
             fa["faces"], seeds_a, fb["faces"], partner_a, score_a, node_index)
         keys_b, score_key_b = keys_for(
@@ -1411,6 +1505,17 @@ def _self_test():
     assert 0 in ha and 1 in ha, "every free face of the node must be checked"
     assert 2 not in ha, "a face without projected overlap is not kept"
     assert 0 in hb
+    # The middle quad is the same continuous surface and must be filled in.
+    q0 = quad([(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)], 400, 1, (1, 2, 3, 4))
+    q1 = quad([(1, 0, 0), (2, 0, 0), (2, 1, 0), (1, 1, 0)], 401, 1, (2, 5, 6, 3))
+    q2 = quad([(2, 0, 0), (3, 0, 0), (3, 1, 0), (2, 1, 0)], 402, 1, (5, 7, 8, 6))
+    plate = quad([(0, 0, 0), (3, 0, 0), (3, 1, 0), (0, 1, 0)], 403, 1, (9, 10, 11, 12))
+    side = quad([(1, 0, 0), (2, 0, 0), (2, 0, 1), (1, 0, 1)], 404, 2, (2, 5, 13, 14))
+    row = [q0, q1, q2, side]
+    acc = set([0, 2])
+    grow_side(row, build_adjacency(row), acc, {}, {}, [plate], set([0]), 1e-6, dot15)
+    assert 1 in acc, "a gap in a continuous surface must be filled"
+    assert 3 not in acc, "a perpendicular face must not be filled in"
 
     def scored(keys, score):
         return dict((key, score) for key in keys)
