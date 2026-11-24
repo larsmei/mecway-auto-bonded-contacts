@@ -73,19 +73,21 @@ For each solid element the script asks Mecway for every face (`mw.face_nodes`). 
 
 Every free face is compared with every opposite face whose bounding box lies within the tolerance. The grid only limits that search. It does not decide the contact. A node is never reduced to one face: each free face that uses the node is tested on its own.
 
+The face normal is the Newell normal of the corner loop. Midside nodes are left out, so a slightly raised midside node cannot flip the face. Quadratic faces are recognised both as corners-then-mids and as a corner/midside walk.
+
 A pair is a contact when the projected overlap is greater than zero. Distance and angle are the only exclusions:
 
 - The normals must point in opposite directions, and the angle between the planes is at most the value you entered. The test is `n1 · n2 <= -cos(angle)`. Faces that point the same way are ignored. 15° is about `n1 · n2 <= -0.9659`.
-- The overlap lies within the tolerance. The gap is measured on the overlap itself, not at the first node of the face. A small overlap is enough. If the whole overlap is farther than the tolerance, there is no contact.
+- The overlap lies within the tolerance. The gap is measured on the overlap itself, not at the first node. A small overlap is enough. The polygon test uses a scale-aware edge tolerance and falls back to a triangle-against-triangle intersection, so two faces that lie on top of each other are not dropped by a rounding error.
 - Nodes are not projected and do not decide the pair. A shared edge has no area and is not a contact.
 
-### 3. What is kept
+### 3. Gaps along the surface
 
-There is no second, weaker pass. A face that fails the three tests above is not added later. Faces that do overlap are all kept, including those whose nodes sit outside the partner outline.
+After the pairs above, a face that shares an edge with an accepted face is added when it faces the partner the opposite way, its gap is within the tolerance, and it lies on or just beside that partner. A perpendicular neighbour is not added. This fills holes. It does not walk across the rest of a large plate.
 
 ### 4. One node, one contact
 
-A node must not appear in more than one contact set. The same component can mate with several partners, and those interfaces share edge nodes.
+A node should not appear in more than one contact set, but one shared edge node must not punch a hole. A face is removed only when half or more of its nodes already belong to another contact. The rest of the face stays.
 
 Each accepted face is scored against its partner:
 
@@ -183,6 +185,7 @@ Edit these near the top of `AutoBondedContacts.py` if the defaults are wrong for
 
 ## Version
 
+1.0.12 — corner normals, robust overlap, gap fill along the surface, and a majority node rule.
 1.0.11 — only faces with opposite normals are contacts. Faces pointing the same way are ignored.
 1.0.10 — a small overlap counts. The gap is measured on the overlap, not at the first node.
 1.0.9 — faces only. Overlap greater than zero is a contact. Distance and angle are the only exclusions. No node projection.

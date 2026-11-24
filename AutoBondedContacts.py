@@ -119,6 +119,73 @@ def dot_min_for_angle(deg):
     return c
 
 
+def corner_points(pts):
+    """Corner loop only. Midside nodes must not steer the normal."""
+    n = len(pts)
+    if n <= 4:
+        return list(pts)
+
+    def near_mid(a, b, m):
+        mx = 0.5 * (a[0] + b[0])
+        my = 0.5 * (a[1] + b[1])
+        mz = 0.5 * (a[2] + b[2])
+        dx = m[0] - mx
+        dy = m[1] - my
+        dz = m[2] - mz
+        edge = (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2
+        return dx * dx + dy * dy + dz * dz <= 0.04 * edge + 1e-18
+
+    if n == 6:
+        if near_mid(pts[0], pts[1], pts[3]) or near_mid(pts[1], pts[2], pts[4]):
+            return [pts[0], pts[1], pts[2]]
+        return [pts[0], pts[2], pts[4]]
+    if n == 8:
+        if near_mid(pts[0], pts[1], pts[4]) or near_mid(pts[1], pts[2], pts[5]):
+            return [pts[0], pts[1], pts[2], pts[3]]
+        return [pts[0], pts[2], pts[4], pts[6]]
+    return list(pts)
+
+
+def newell_normal(pts):
+    nx = 0.0
+    ny = 0.0
+    nz = 0.0
+    n = len(pts)
+    for i in xrange(n):
+        p = pts[i]
+        q = pts[(i + 1) % n]
+        nx += (p[1] - q[1]) * (p[2] + q[2])
+        ny += (p[2] - q[2]) * (p[0] + q[0])
+        nz += (p[0] - q[0]) * (p[1] + q[1])
+    ln = math.sqrt(nx * nx + ny * ny + nz * nz)
+    if ln < 1e-18:
+        return None
+    return (nx / ln, ny / ln, nz / ln)
+
+
+def plane_from_corners(pts):
+    normal = newell_normal(pts)
+    if normal is None:
+        return None
+    p0 = pts[0]
+    e1 = None
+    for p in pts[1:]:
+        edge = sub(p, p0)
+        if length(edge) >= 1e-15:
+            e1 = edge
+            break
+    if e1 is None:
+        return None
+    l1 = length(e1)
+    u = (e1[0] / l1, e1[1] / l1, e1[2] / l1)
+    v = cross(normal, u)
+    lv = length(v)
+    if lv < 1e-18:
+        return None
+    v = (v[0] / lv, v[1] / lv, v[2] / lv)
+    return p0, normal, u, v
+
+
 def plane_basis(pts):
     p0 = pts[0]
     npts = len(pts)
@@ -128,14 +195,14 @@ def plane_basis(pts):
         if l1 < 1e-15:
             continue
         for j in xrange(i + 1, npts):
-            n = cross(e1, sub(pts[j], p0))
-            ln = length(n)
+            nrm = cross(e1, sub(pts[j], p0))
+            ln = length(nrm)
             if ln < 1e-18:
                 continue
-            n = (n[0] / ln, n[1] / ln, n[2] / ln)
+            nrm = (nrm[0] / ln, nrm[1] / ln, nrm[2] / ln)
             u = (e1[0] / l1, e1[1] / l1, e1[2] / l1)
-            v = cross(n, u)
-            return p0, n, u, v
+            v = cross(nrm, u)
+            return p0, nrm, u, v
     return None
 
 
@@ -184,11 +251,14 @@ def dist_point_seg_2d(p, a, b):
 
 
 def prepare_face(eid, fid, pts, kind, nodes):
-    basis = plane_basis(pts)
+    corners = corner_points(pts)
+    basis = plane_from_corners(corners)
+    if basis is None:
+        basis = plane_basis(pts)
     if basis is None:
         return None
     origin, normal, u, v = basis
-    hull = convex_hull([to_2d(p, origin, u, v) for p in pts])
+    hull = convex_hull([to_2d(p, origin, u, v) for p in corners])
     if len(hull) < 3:
         return None
     n = float(len(pts))
@@ -234,7 +304,13 @@ def polygon_area(poly):
 def clip_convex(subject, clip):
     """Sutherland-Hodgman. Both polygons are convex and counter-clockwise."""
     def is_inside(p, a, b):
-        return (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]) >= -1e-14
+        cr = (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
+        el = math.hypot(b[0] - a[0], b[1] - a[1])
+        scale = max(
+            abs(a[0]), abs(a[1]), abs(b[0]), abs(b[1]), abs(p[0]), abs(p[1]), 1.0,
+        )
+        slack = el * 1e-8 + scale * 1e-12
+        return cr >= -slack
 
     def crossing(p, q, a, b):
         rx = q[0] - p[0]
@@ -345,6 +421,42 @@ def overlap_gap(inter, c0, cs, ct):
     return best
 
 
+def polygon_inside(inner, outer):
+    """True when every vertex of inner lies in the convex outer polygon."""
+    if len(inner) < 3 or len(outer) < 3:
+        return False
+    n = len(outer)
+    for p in inner:
+        for i in xrange(n):
+            a = outer[i]
+            b = outer[(i + 1) % n]
+            cr = (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
+            el = math.hypot(b[0] - a[0], b[1] - a[1])
+            scale = max(abs(a[0]), abs(a[1]), abs(b[0]), abs(b[1]), abs(p[0]), abs(p[1]), 1.0)
+            if cr < -(el * 1e-8 + scale * 1e-12):
+                return False
+    return True
+
+
+def fan_overlap(subject, clip):
+    """Triangle-against-triangle overlap, used when the full clip collapses."""
+    if len(subject) < 3 or len(clip) < 3:
+        return []
+    if len(subject) == 3 and len(clip) == 3:
+        return []
+    best = []
+    best_area = 0.0
+    p0 = subject[0]
+    for i in xrange(1, len(subject) - 1):
+        tri = (p0, subject[i], subject[i + 1])
+        inter = clip_convex(tri, clip)
+        area = polygon_area(inter)
+        if area > best_area:
+            best_area = area
+            best = inter
+    return best
+
+
 def overlap_on(base, other, tol):
     """Projected overlap area. A small overlap counts when it lies within the tolerance.
 
@@ -359,7 +471,16 @@ def overlap_on(base, other, tol):
         return 0.0
     inter = clip_convex(base["hull"], other_hull)
     if len(inter) < 3:
-        return 0.0
+        if polygon_inside(base["hull"], other_hull):
+            inter = base["hull"]
+        elif polygon_inside(other_hull, base["hull"]):
+            inter = other_hull
+        else:
+            inter = fan_overlap(base["hull"], other_hull)
+            if len(inter) < 3:
+                inter = fan_overlap(other_hull, base["hull"])
+            if len(inter) < 3:
+                return 0.0
     area = polygon_area(inter)
     if area <= 0.0:
         return 0.0
@@ -446,7 +567,11 @@ def build_adjacency(faces):
 
 
 def resolve_exclusive(pairs, node_index):
-    """Each node is in one set. The better geometric fit keeps the face."""
+    """A face stays when most of its nodes are still free.
+
+    One shared edge node does not remove the face. The face is dropped
+    only when half or more of its nodes already belong to another contact.
+    """
     items = []
     for i, pair in enumerate(pairs):
         _c1, _c2, h1, h2, score1, score2 = pair
@@ -460,17 +585,19 @@ def resolve_exclusive(pairs, node_index):
     removed = 0
     for _score, i, side, key in items:
         nodes = node_index.get(key, ())
-        conflict = False
+        if not nodes:
+            continue
+        taken = 0
         for nid in nodes:
             other = owner.get(nid)
             if other is not None and other != i:
-                conflict = True
-                break
-        if conflict:
+                taken += 1
+        if taken * 2 >= len(nodes):
             removed += 1
             continue
         for nid in nodes:
-            owner[nid] = i
+            if nid not in owner:
+                owner[nid] = i
         bucket = kept.get(i)
         if bucket is None:
             bucket = [set(), set()]
@@ -752,6 +879,119 @@ def find_interface(list_a, list_b, tol, dot_min, prog, frac, text):
     return hits_a, hits_b, score_a, score_b, partner_a, partner_b
 
 
+def plane_dist(point, face):
+    normal = face["normal"]
+    origin = face["origin"]
+    gap = (
+        (point[0] - origin[0]) * normal[0]
+        + (point[1] - origin[1]) * normal[1]
+        + (point[2] - origin[2]) * normal[2]
+    )
+    if gap < 0.0:
+        return -gap
+    return gap
+
+
+def outside_hull(point, face):
+    """In-plane distance outside the face outline. Zero when the point is inside."""
+    d = sub(point, face["origin"])
+    p2 = (dot(d, face["u"]), dot(d, face["v"]))
+    hull = face["hull"]
+    n = len(hull)
+    nearest = None
+    outside = False
+    for i in xrange(n):
+        a = hull[i]
+        b = hull[(i + 1) % n]
+        cr = (b[0] - a[0]) * (p2[1] - a[1]) - (b[1] - a[1]) * (p2[0] - a[0])
+        if cr < -1e-12:
+            outside = True
+            de = dist_point_seg_2d(p2, a, b)
+            if nearest is None or de < nearest:
+                nearest = de
+    if not outside:
+        return 0.0
+    if nearest is None:
+        return 0.0
+    return nearest
+
+
+def face_sits_on(face, other, tol, dot_min):
+    """Opposite, within the gap, and lying on or just beside the partner outline."""
+    if not angle_ok(face, other, dot_min):
+        return False
+    samples = [face["centroid"]]
+    samples.extend(face["pts"])
+    close = False
+    for point in samples:
+        if plane_dist(point, other) > tol:
+            continue
+        if outside_hull(point, other) <= tol:
+            close = True
+            break
+    return close
+
+
+def _grow_side(faces, adj, acc, score, partner_of, partner_faces, partner_acc, bins, tol, dot_min):
+    if not acc:
+        return
+    pending = list(acc)
+    seen = set(acc)
+    while pending:
+        i = pending.pop()
+        for j in adj[i]:
+            if j in seen:
+                continue
+            face = faces[j]
+            chosen = None
+            gap = tol
+            for ib in bins.query(face["aabb"]):
+                other = partner_faces[ib]
+                if not angle_ok(face, other, dot_min):
+                    continue
+                if not aabb_hit(face["aabb"], other["aabb"], tol):
+                    continue
+                area = overlap_area(face, other, tol)
+                if area <= 0.0 and not face_sits_on(face, other, tol, dot_min):
+                    continue
+                chosen = ib
+                gap = plane_dist(face["centroid"], other)
+                break
+            if chosen is None:
+                continue
+            seen.add(j)
+            acc.add(j)
+            pending.append(j)
+            partner_acc.add(chosen)
+            _better(score, j, 0.25, gap)
+            if j not in partner_of:
+                partner_of[j] = chosen
+
+
+def close_pair(faces_a, acc_a, score_a, partner_a, faces_b, acc_b, score_b, partner_b, tol, dot_min):
+    """Fill holes along an accepted surface. A perpendicular neighbour stays out."""
+    if not acc_a or not acc_b:
+        return
+    adj_a = build_adjacency(faces_a)
+    adj_b = build_adjacency(faces_b)
+    bins_a = Broadphase(faces_a, tol)
+    bins_b = Broadphase(faces_b, tol)
+    limit = 6
+    for _ in xrange(limit):
+        before_a = len(acc_a)
+        before_b = len(acc_b)
+        _grow_side(
+            faces_a, adj_a, acc_a, score_a, partner_a,
+            faces_b, acc_b, bins_b, tol, dot_min,
+        )
+        _grow_side(
+            faces_b, adj_b, acc_b, score_b, partner_b,
+            faces_a, acc_a, bins_a, tol, dot_min,
+        )
+        if len(acc_a) == before_a and len(acc_b) == before_b:
+            break
+
+
 def master_slave(name_a, hits_a, name_b, hits_b):
     if len(hits_b) > len(hits_a):
         return name_a, hits_a, name_b, hits_b
@@ -938,6 +1178,10 @@ USAGE = (
     "including a small overlap. The normals must point in opposite directions "
     "and stay within the angle limit. Faces pointing the same way are ignored. "
     "The distance is taken on the overlap, not at the first node.\n"
+    "A neighbouring face is added when it lies on the same surface, "
+    "faces the opposite way and is within the tolerance.\n"
+    "A face is kept when most of its nodes are still free. "
+    "One shared edge node does not remove it.\n"
     "Each node belongs to only one contact set. Beams are ignored.\n\n"
     "Save the model first. After the run, reload it and do not save before that."
 )
@@ -1087,6 +1331,12 @@ def _run(tol_mm, tol_m, angle, dot_min, prog, comps):
             fa["faces"], fb["faces"], tol_m, dot_min, prog, frac, text)
         if not hits_a or not hits_b:
             continue
+        prog.set(frac + 0.01, "Closing gaps: %s / %s" % (na, nb), force=True)
+        close_pair(
+            fa["faces"], hits_a, score_a, partner_a,
+            fb["faces"], hits_b, score_b, partner_b,
+            tol_m, dot_min,
+        )
         keys_a, score_key_a = keys_for(
             fa["faces"], hits_a, fb["faces"], partner_a, score_a, node_index)
         keys_b, score_key_b = keys_for(
@@ -1303,29 +1553,47 @@ def _self_test():
                 owned[nid] = key
     assert 3 in owned
     assert len(resolved) == 1
-    node_index[(3, 1)] = (3, 20)
-    node_index[(3, 2)] = (21, 22)
-    node_index[(4, 1)] = (30, 31)
-    node_index[(4, 2)] = (32, 33)
+    # One shared node of three keeps the face. Two shared nodes remove it.
+    node_index[(3, 1)] = (3, 20, 21)
+    node_index[(8, 1)] = (1, 2, 30)
+    node_index[(9, 2)] = (40, 41)
     pairs2 = [
-        ("A", "B", set([(1, 1), (1, 2)]), set([(9, 1)]),
-         {(1, 1): low, (1, 2): high}, {(9, 1): high}),
-        ("C", "D", set([(3, 1), (3, 2)]), set([(4, 1), (4, 2)]),
-         {(3, 1): high, (3, 2): high}, {(4, 1): high, (4, 2): high}),
+        ("A", "B", set([(1, 1)]), set([(9, 1)]),
+         {(1, 1): high}, {(9, 1): high}),
+        ("C", "D", set([(3, 1), (8, 1)]), set([(9, 2)]),
+         {(3, 1): low, (8, 1): low}, {(9, 2): low}),
     ]
     resolved2, removed2, dropped2 = resolve_exclusive(pairs2, node_index)
-    assert dropped2 == 0
-    assert removed2 == 1
-    seen = {}
-    for _c1, _c2, h1, h2 in resolved2:
-        for key in list(h1) + list(h2):
-            for nid in node_index[key]:
-                assert nid not in seen
-                seen[nid] = True
     keys2 = [k for _a, _b, h1, h2 in resolved2 for k in list(h1) + list(h2)]
-    assert (1, 1) not in keys2
-    assert (3, 1) in keys2
-    assert 3 in seen
+    assert (3, 1) in keys2, "one shared node must not remove a three-node face"
+    assert (8, 1) not in keys2, "two shared nodes remove the face"
+    assert removed2 == 1
+    assert dropped2 == 0
+
+    # Raised midside nodes must not tilt the corner normal.
+    mid = (0.5, 0.0, 0.2)
+    warped = quad(
+        [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), mid, (1, 0.5, 0), (0.5, 1, 0), (0, 0.5, 0)],
+        900, 1, (1, 2, 3, 4, 5, 6, 7, 8),
+    )
+    assert warped["normal"][2] > 0.99, "the normal follows the corners, not the midside node"
+
+    # A hole between two accepted faces on the same plane is filled.
+    # The wall sharing only an edge is not.
+    row0 = quad([(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)], 910, 1, (1, 2, 3, 4))
+    row1 = quad([(1, 0, 0), (2, 0, 0), (2, 1, 0), (1, 1, 0)], 911, 1, (2, 5, 6, 3))
+    row2 = quad([(2, 0, 0), (3, 0, 0), (3, 1, 0), (2, 1, 0)], 912, 1, (5, 7, 8, 6))
+    side = quad([(1, 0, 0), (2, 0, 0), (2, 0, 1), (1, 0, 1)], 913, 2, (2, 5, 13, 14))
+    bed = oppose(quad([(0, 0, 0.001), (3, 0, 0.001), (3, 1, 0.001), (0, 1, 0.001)], 914, 1, (20, 21, 22, 23)))
+    row = [row0, row1, row2, side]
+    acc = set([0, 2])
+    close_pair(
+        row, acc, {}, {},
+        [bed], set([0]), {}, {},
+        0.01, dot15,
+    )
+    assert 1 in acc, "a planar hole between accepted faces is filled"
+    assert 3 not in acc, "a perpendicular face is not filled in"
     print("self-test ok")
 
 
